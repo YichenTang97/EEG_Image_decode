@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch.nn as nn
 import torchvision.transforms as transforms
-from tqdm import tqdm
+import tqdm
 from eegdatasets_leaveone import EEGDataset
 
 from einops.layers.torch import Rearrange, Reduce
@@ -247,127 +247,17 @@ def train_model(sub, eeg_model, dataloader, optimizer, device, text_features_all
     accuracy = correct / total
     return average_loss, accuracy, torch.cat(features_list, dim=0)
 
-def evaluate_model(sub, eeg_model, dataloader, device, text_features_all, img_features_all, k, config):
-    eeg_model.eval()
-
-    text_features_all = text_features_all.to(device).float()
-    img_features_all = img_features_all.to(device).float()
-    total_loss = 0
-    correct = 0
-    total = 0
-    alpha = 0.99
-    top5_correct = 0
-    top5_correct_count = 0
-    all_labels = set(range(text_features_all.size(0)))
-    top5_acc = 0
-    mse_loss_fn = nn.MSELoss()
-    with torch.no_grad():
-        for batch_idx, (eeg_data, labels, text, text_features, img, img_features) in enumerate(dataloader):
-            eeg_data = eeg_data.to(device)
-            text_features = text_features.to(device).float()
-            labels = labels.to(device)
-            img_features = img_features.to(device).float()
-            
-            batch_size = eeg_data.size(0)  # Assume the first element is the data tensor
-            subject_id = extract_id_from_string(sub)
-            # eeg_data = eeg_data.permute(0, 2, 1)
-            subject_ids = torch.full((batch_size,), subject_id, dtype=torch.long).to(device)
-            # if not config.insubject:
-            #     subject_ids = torch.full((batch_size,), -1, dtype=torch.long).to(device)          
-            eeg_features = eeg_model(eeg_data, subject_ids)
-
-        
-            logit_scale = eeg_model.logit_scale 
-            # print(eeg_features.type, text_features.type, img_features.type)
-            img_loss = eeg_model.loss_func(eeg_features, img_features, logit_scale)
-            text_loss = eeg_model.loss_func(eeg_features, text_features, logit_scale)
-            regress_loss =  mse_loss_fn(eeg_features, img_features)
-            loss = (alpha * regress_loss *10 + (1 - alpha) * img_loss*10)
-                
-            total_loss += loss.item()
-            
-            for idx, label in enumerate(labels):
-                # First select k-1 classes excluding the correct class
-                possible_classes = list(all_labels - {label.item()})
-                selected_classes = random.sample(possible_classes, k-1) + [label.item()]
-                selected_img_features = img_features_all[selected_classes]
-                selected_text_features = text_features_all[selected_classes]
-                
-                if k==200:
-                    # Compute corresponding logits
-                    logits_img = logit_scale * eeg_features[idx] @ selected_img_features.T
-                    logits_single = logits_img
-                    # print("logits_single", logits_single.shape)
-                    # Get predicted class
-                    # predicted_label = selected_classes[torch.argmax(logits_single).item()]
-                    predicted_label = selected_classes[torch.argmax(logits_single).item()] # (n_batch, ) ∈ {0, 1, ..., n_cls-1}
-                    if predicted_label == label.item():
-                        # print("predicted_label", predicted_label)
-                        correct += 1
-                    
-                    # logits_single is the model output, assumed to be shape (n_batch, n_classes)
-                    # label is the true label, shape (n_batch,)
-                    # Get top-5 predicted indices
-                    # print("logits_single", logits_single)
-                    _, top5_indices = torch.topk(logits_single, 5, largest =True)
-                                                           
-                    # Check if true label is in top-5 predictions
-                    if label.item() in [selected_classes[i] for i in top5_indices.tolist()]:                
-                        top5_correct_count+=1                                
-                    total += 1
-                elif k == 50 or k == 100:
-                    # For k=50 or 100, select k classes for evaluation
-                    selected_classes = random.sample(possible_classes, k-1) + [label.item()]
-
-                    logits_img = logit_scale * eeg_features[idx] @ selected_img_features.T
-                    logits_single = logits_img
-                    
-                    predicted_label = selected_classes[torch.argmax(logits_single).item()]
-                    if predicted_label == label.item():
-                        correct += 1
-                    _, top5_indices = torch.topk(logits_single, 5, largest =True)
-                                                           
-                    # Check if true label is in top-5 predictions
-                    if label.item() in [selected_classes[i] for i in top5_indices.tolist()]:                
-                        top5_correct_count+=1                                
-                    total += 1
-                elif k==2 or k==4 or k==10:
-                    selected_classes = random.sample(possible_classes, k-1) + [label.item()]
-                    # Compute corresponding logits
-                    logits_img = logit_scale * eeg_features[idx] @ selected_img_features.T
-                    # logits_text = logit_scale * eeg_features[idx] @ selected_text_features.T
-                    # logits_single = (logits_text + logits_img) / 2.0
-                    logits_single = logits_img
-                    # print("logits_single", logits_single.shape)
-                    # Get predicted class
-                    # predicted_label = selected_classes[torch.argmax(logits_single).item()]
-                    predicted_label = selected_classes[torch.argmax(logits_single).item()] # (n_batch, ) ∈ {0, 1, ..., n_cls-1}
-                    if predicted_label == label.item():
-                        correct += 1
-                    total += 1
-                else:
-                    print("Error.")
-            del eeg_data, eeg_features, img_features
-    average_loss = total_loss / (batch_idx+1)
-    accuracy = correct / total
-    top5_acc = top5_correct_count / total
-    return average_loss, accuracy, top5_acc
-
 def main_train_loop(sub, current_time, eeg_model, train_dataloader, test_dataloader, optimizer, device, text_features_train_all, text_features_test_all, img_features_train_all, img_features_test_all, config, logger=None):
     logger = wandb_logger(config) if logger else None
     logger.watch(eeg_model,logger) 
     train_losses, train_accuracies = [], []
-    test_losses, test_accuracies = [], []
-    v2_accs = []
-    v4_accs = []
-    v10_accs = []
 
     best_accuracy = 0.0
     best_model_weights = None
     best_epoch_info = {}
     results = []  # List to store results for each epoch
     
-    for epoch in tqdm(range(config.epochs)):
+    for epoch in range(config.epochs):
         # Train the model
         train_loss, train_accuracy, features_tensor = train_model(sub, eeg_model, train_dataloader, optimizer, device, text_features_train_all, img_features_train_all, config=config)
         if (epoch +1) % 5 == 0:                    
@@ -383,67 +273,22 @@ def main_train_loop(sub, current_time, eeg_model, train_dataloader, test_dataloa
             print(f"Model saved in {file_path}!")
         train_losses.append(train_loss)
         train_accuracies.append(train_accuracy)
-
-
-        # Evaluate the model
-        test_loss, test_accuracy, top5_acc = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all,k=200, config=config)
-        _, v2_acc, _ = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all, k = 2, config=config)
-        _, v4_acc, _ = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all, k = 4, config=config)
-        _, v10_acc, _ = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all, k = 10, config=config)
-        _, v50_acc, v50_top5_acc = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all,  k=50, config=config)
-        _, v100_acc, v100_top5_acc = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all,  k=100, config=config)
-        test_losses.append(test_loss)
-        test_accuracies.append(test_accuracy)
-        v2_accs.append(v2_acc)
-        v4_accs.append(v4_acc)
-        v10_accs.append(v10_acc)
         
         # Append results for this epoch
         epoch_results = {
         "epoch": epoch + 1,
-        # "train_loss": train_loss,
-        # "train_accuracy": train_accuracy,
-        "test_loss": test_loss,
-        "test_accuracy": test_accuracy,
-        "v2_acc": v2_acc,
-        "v4_acc": v4_acc,
-        "v10_acc": v10_acc,
-        "top5_acc":top5_acc,
-        "v50_acc": v50_acc,
-        "v100_acc": v100_acc,
-        "v50_top5_acc":v50_top5_acc,
-        "v100_top5_acc": v100_top5_acc
+        "train_loss": train_loss,
+        "train_accuracy": train_accuracy,
         }
 
         results.append(epoch_results)
-        # If the test accuracy of the current epoch is the best, save the model and related information
-        if test_accuracy > best_accuracy:
-            best_accuracy = test_accuracy
-            # best_model_weights = model.state_dict().copy()
-            
-            best_epoch_info = {
-                "epoch": epoch + 1,
-                "train_loss": train_loss,
-                "train_accuracy": train_accuracy,
-                "test_loss": test_loss,
-                "test_accuracy": test_accuracy,
-                "v2_acc":v2_acc,
-                "v4_acc":v4_acc,
-                "v10_acc":v10_acc
-            }
         logger.log({
             "Train Loss": train_loss,
             "Train Accuracy": train_accuracy,
-            "Test Loss": test_loss,
-            "Test Accuracy": test_accuracy,
-            "v2 Accuracy": v2_acc,
-            "v4 Accuracy": v4_acc,
-            "v10 Accuracy": v10_acc,
             "Epoch": epoch
         })
 
-        print(f"Epoch {epoch + 1}/{config.epochs} - Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}, Top5 Accuracy: {top5_acc:.4f}")
-        print(f"Epoch {epoch + 1}/{config.epochs} - v2 Accuracy:{v2_acc} - v4 Accuracy:{v4_acc} - v10 Accuracy:{v10_acc} - v50 Accuracy:{v50_acc} - v100 Accuracy:{v100_acc}")
+        print(f"Epoch {epoch + 1}/{config.epochs} - Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}")
   
     # # Load best model weights
     # model.load_state_dict(best_model_weights)
@@ -456,44 +301,13 @@ def main_train_loop(sub, current_time, eeg_model, train_dataloader, test_dataloa
 
     # Loss plot
     axs[0, 0].plot(train_losses, label='Train Loss')
-    axs[0, 0].plot(test_losses, label='Test Loss')
     axs[0, 0].legend()
     axs[0, 0].set_title("Loss Curve")
 
     # Overall accuracy plot
     axs[0, 1].plot(train_accuracies, label='Train Accuracy')
-    axs[0, 1].plot(test_accuracies, label='Test Accuracy')
     axs[0, 1].legend()
     axs[0, 1].set_title("Accuracy Curve")
-
-    # The following are the three new plots you added, assuming you have calculated the corresponding accuracies
-    # 2-class accuracy plot
-    axs[1, 0].plot(v2_accs, label='2-class Accuracy')
-    axs[1, 0].legend()
-    axs[1, 0].set_title("2-Class Accuracy Curve")
-
-    # 4-class accuracy plot
-    axs[1, 1].plot(v4_accs, label='4-class Accuracy')
-    axs[1, 1].legend()
-    axs[1, 1].set_title("4-Class Accuracy Curve")
-
-    # 10-class accuracy plot
-    axs[2, 0].plot(v10_accs, label='10-class Accuracy')
-    axs[2, 0].legend()
-    axs[2, 0].set_title("10-Class Accuracy Curve")
-
-    # Construct the string information you want to annotate
-    info_text = (f"Best Model Info (from Epoch {best_epoch_info['epoch']}):\n"
-                f"Train Loss: {best_epoch_info['train_loss']:.4f}\n"
-                f"Train Accuracy: {best_epoch_info['train_accuracy']:.4f}\n"
-                f"Test Loss: {best_epoch_info['test_loss']:.4f}\n"
-                f"Test Accuracy: {best_epoch_info['test_accuracy']:.4f}\n"
-                f"v2_acc:{best_epoch_info['v2_acc']:.4f}\n"
-                f"v4_acc:{best_epoch_info['v4_acc']:.4f}\n"
-                f"v10_acc:{best_epoch_info['v10_acc']:.4f}")
-
-    axs[2, 1].axis('off')  
-    axs[2, 1].text(0.5, 0.5, info_text, fontsize=10, ha='center', va='center', transform=axs[2, 1].transAxes)
 
     plt.tight_layout()
 
@@ -508,7 +322,7 @@ import datetime
 def main():
     # Use argparse to parse the command-line arguments
     parser = argparse.ArgumentParser(description='EEG Transformer Training Script')
-    parser.add_argument('--data_path', type=str, default="/root/autodl-tmp/THINGS/Preprocessed_data_250Hz", help='Path to the EEG dataset')
+    parser.add_argument('--data_path', type=str, default="./../Preprocessed_data_250Hz", help='Path to the EEG dataset')
     parser.add_argument('--output_dir', type=str, default='./outputs/contrast', help='Directory to save output results')    
     parser.add_argument('--project', type=str, default="train_pos_img_text_rep", help='WandB project name')
     parser.add_argument('--entity', type=str, default="sustech_rethinkingbci", help='WandB entity name')
@@ -523,7 +337,6 @@ def main():
     parser.add_argument('--encoder_type', type=str, default='ATMS', help='Encoder type')
     parser.add_argument('--subjects', nargs='+', default=['sub-01', 'sub-02', 'sub-03', 'sub-04', 'sub-05', 'sub-06', 'sub-07', 'sub-08', 'sub-09', 'sub-10'], help='List of subject IDs (default: sub-01 to sub-10)')    
     args = parser.parse_args()
-    print(args)
 
     # Set device based on the argument
     if args.device == 'gpu' and torch.cuda.is_available():
@@ -531,58 +344,36 @@ def main():
     else:
         device = torch.device('cpu')
 
-    print(f"Using device: {device}")
-
     subjects = args.subjects        
     current_time = datetime.datetime.now().strftime("%m-%d_%H-%M")
 
-    for sub in subjects:
-        print(f"Training on subject: {sub}")
-        # Initialize the EEG model
-        print(f"Initializing model: {args.encoder_type}")
-        eeg_model = globals()[args.encoder_type]()
-        eeg_model.to(device)
-        print(f"Model initialized: {args.encoder_type}")
+    # for sub in subjects:
+    sub = 'sub_mock'
+    eeg_model = globals()[args.encoder_type]()
+    eeg_model.to(device)
 
-        optimizer = AdamW(itertools.chain(eeg_model.parameters()), lr=args.lr)
+    optimizer = AdamW(itertools.chain(eeg_model.parameters()), lr=args.lr)
 
-        print(f"Loading dataset for subject: {sub}")
-        if args.insubject:
-            train_dataset = EEGDataset(args.data_path, subjects=[sub], train=True)
-            test_dataset = EEGDataset(args.data_path, subjects=[sub], train=False)
-        else:
-            train_dataset = EEGDataset(args.data_path, exclude_subject=sub, subjects=subjects, train=True)
-            test_dataset = EEGDataset(args.data_path, exclude_subject=sub, subjects=subjects, train=False)
+    train_dataset = EEGDataset(args.data_path, subjects=subjects, train=True)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
 
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
-        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=True, num_workers=0, drop_last=True)
+    text_features_train_all = train_dataset.text_features
+    img_features_train_all = train_dataset.img_features
 
-        print(f"Dataset loaded for subject: {sub}")
+    results = main_train_loop(sub, current_time, eeg_model, train_loader, None, optimizer, device, 
+                                text_features_train_all, None, img_features_train_all, None, config=args, logger=args.logger)
 
-        text_features_train_all = train_dataset.text_features
-        text_features_test_all = test_dataset.text_features
-        img_features_train_all = train_dataset.img_features
-        img_features_test_all = test_dataset.img_features
+    # Save results to a CSV file
+    results_dir = os.path.join(args.output_dir, args.encoder_type, sub, current_time)
+    os.makedirs(results_dir, exist_ok=True)
 
-        print("Starting training loop...")
-        results = main_train_loop(sub, current_time, eeg_model, train_loader, test_loader, optimizer, device, 
-                                  text_features_train_all, text_features_test_all, img_features_train_all, img_features_test_all, config=args, logger=args.logger)
+    results_file = f"{results_dir}/{args.encoder_type}_{sub}.csv"
 
-
-        # Save results to a CSV file
-        results_dir = os.path.join(args.output_dir, args.encoder_type, sub, current_time)
-        os.makedirs(results_dir, exist_ok=True)
-
-        if args.insubject:
-            results_file = f"{results_dir}/{args.encoder_type}_{sub}.csv"
-        else:
-            results_file = f"{results_dir}/{args.encoder_type}_cross_exclude_{sub}.csv"
-
-        with open(results_file, 'w', newline='') as file:
-            writer = csv.DictWriter(file, fieldnames=results[0].keys())
-            writer.writeheader()
-            writer.writerows(results)
-            print(f'Results saved to {results_file}')
+    with open(results_file, 'w', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=results[0].keys())
+        writer.writeheader()
+        writer.writerows(results)
+        print(f'Results saved to {results_file}')
 
                 
 if __name__ == '__main__':

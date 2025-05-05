@@ -15,12 +15,12 @@ pip install dalle2-pytorch
 
 pip install open_clip_torch
 
-pip install transformers==4.28.0.dev0
+pip install transformers==4.28.0 #.dev0
 pip install diffusers==0.24.0
 
 pip install braindecode==0.8.1
 
-pip install torchvision==0.15.2 torch==2.0.1
+pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
 
 pip install info-nce-pytorch==0.1.0
 pip install pytorch-msssim

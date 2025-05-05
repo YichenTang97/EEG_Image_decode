@@ -20,7 +20,7 @@ device = "cuda:0" if torch.cuda.is_available() else "cpu"
 model_type = 'ViT-H-14'
 import open_clip
 vlmodel, preprocess_train, feature_extractor = open_clip.create_model_and_transforms(
-    model_type, pretrained='laion2b_s32b_b79k', precision='fp32', device = device)
+    model_type, pretrained="./variables/CLIP-ViT-H-14-laion2B-s32B-b79K/open_clip_pytorch_model.bin", precision='fp32', device = device)
 
 import json
 

@@ -27,3 +27,7 @@ Retrieval/Outputs
 Retrieval/sliding_window_outputs
 Retrieval/Visualize
 Retrieval/wandb
+
+*.cache/
+images_set/
+Preprocessed_data_250Hz/
