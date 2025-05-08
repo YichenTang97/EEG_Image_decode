@@ -14,13 +14,29 @@ proxy = 'http://127.0.0.1:7890'
 os.environ['http_proxy'] = proxy
 os.environ['https_proxy'] = proxy
 cuda_device_count = torch.cuda.device_count()
-print(cuda_device_count)
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-# vlmodel, preprocess = clip.load("ViT-B/32", device=device)
-model_type = 'ViT-H-14'
-import open_clip
-vlmodel, preprocess_train, feature_extractor = open_clip.create_model_and_transforms(
-    model_type, pretrained="./variables/CLIP-ViT-H-14-laion2B-s32B-b79K/open_clip_pytorch_model.bin", precision='fp32', device = device)
+# print(cuda_device_count)
+# print('eeg_datasets_leaveone.py been imported')
+
+# Singleton class to manage shared resources
+class SharedResources:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(SharedResources, cls).__new__(cls)
+            cls._instance._initialize()
+        return cls._instance
+
+    def _initialize(self):
+        import open_clip
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        self.model_type = 'ViT-H-14'
+        self.vlmodel, self.preprocess_train, self.feature_extractor = open_clip.create_model_and_transforms(
+            self.model_type, 
+            pretrained="./variables/CLIP-ViT-H-14-laion2B-s32B-b79K/open_clip_pytorch_model.bin", 
+            precision='fp32', 
+            device=self.device
+        )
 
 import json
 
@@ -58,10 +74,14 @@ class EEGDataset():
         
         self.data = self.extract_eeg(self.data, time_window)
         
+        shared_resources = SharedResources()
+        self.device = shared_resources.device
+        self.vlmodel = shared_resources.vlmodel
+        self.preprocess_train = shared_resources.preprocess_train
         
         if self.classes is None and self.pictures is None:
             # Try to load the saved features if they exist
-            features_filename = os.path.join(f'{model_type}_features_train.pt') if self.train else os.path.join(f'{model_type}_features_test.pt')
+            features_filename = os.path.join(f'{shared_resources.model_type}_features_train.pt') if self.train else os.path.join(f'{shared_resources.model_type}_features_test.pt')
             
             if os.path.exists(features_filename) :
                 saved_features = torch.load(features_filename)
@@ -297,11 +317,11 @@ class EEGDataset():
     
     def Textencoder(self, text):   
             
-            text_inputs = torch.cat([clip.tokenize(t) for t in text]).to(device)
+            text_inputs = torch.cat([clip.tokenize(t) for t in text]).to(self.device)
             # print("text_inputs", text_inputs)
             
             with torch.no_grad():
-                text_features = vlmodel.encode_text(text_inputs)
+                text_features = self.vlmodel.encode_text(text_inputs)
             
             text_features = F.normalize(text_features, dim=-1).detach()
        
@@ -313,10 +333,10 @@ class EEGDataset():
       
         for i in range(0, len(images), batch_size):
             batch_images = images[i:i + batch_size]
-            image_inputs = torch.stack([preprocess_train(Image.open(img).convert("RGB")) for img in batch_images]).to(device)
+            image_inputs = torch.stack([self.preprocess_train(Image.open(img).convert("RGB")) for img in batch_images]).to(self.device)
 
             with torch.no_grad():
-                batch_image_features = vlmodel.encode_image(image_inputs)
+                batch_image_features = self.vlmodel.encode_image(image_inputs)
                 batch_image_features /= batch_image_features.norm(dim=-1, keepdim=True)
 
             image_features_list.append(batch_image_features)
@@ -401,7 +421,6 @@ if __name__ == "__main__":
     x, label, text, text_features, img, img_features  = test_dataset[i]
     print(f"Index {i}, Label: {label}, text: {text}")
     Image.open(img)
-            
-    
-        
-    
+
+
+

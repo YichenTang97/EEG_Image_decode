@@ -16,6 +16,8 @@ Generation/tab_generation_metric_outputs
 Generation/THINGS
 Generation/Visualize
 Generation/wandb
+Generation/sdxl-turbo
+Generation/IP_Adapter
 Retrieval/__pycache__
 Retrieval/centralRepo
 Retrieval/CLIP-dissect

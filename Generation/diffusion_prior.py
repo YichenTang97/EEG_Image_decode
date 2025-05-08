@@ -4,6 +4,9 @@ from torch import nn
 import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
+import torch.multiprocessing as mp
+
+mp.set_start_method('spawn', force=True)
 
 from diffusers.models.embeddings import Timesteps, TimestepEmbedding
 from torch.utils.data import Dataset
@@ -300,7 +303,7 @@ class Pipe:
                 h_embeds = batch['h_embedding'].to(device)
                 N = h_embeds.shape[0]
 
-                # 1. randomly replecing c_embeds to None
+                # 1. randomly replacing c_embeds to None
                 if torch.rand(1) < 0.1:
                     c_embeds = None
 
@@ -335,6 +338,7 @@ class Pipe:
 
             loss_epoch = loss_sum / len(dataloader)
             print(f'epoch: {epoch}, loss: {loss_epoch}')
+            torch.cuda.empty_cache()  # Clear CUDA memory after each epoch
             # lr_scheduler.step(loss)
 
     def generate(

@@ -1,3 +1,6 @@
+import torch.multiprocessing as mp
+mp.set_start_method('spawn', force=True)
+
 from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import *
 
 @torch.no_grad()
@@ -466,13 +469,15 @@ class Generator4Embeds:
         
         # path = '/home/weichen/.cache/huggingface/hub/models--stabilityai--sdxl-turbo/snapshots/f4b0486b498f84668e828044de1d0c8ba486e05b'
         # path = "/home/ldy/Workspace/sdxl-turbo/f4b0486b498f84668e828044de1d0c8ba486e05b"
-        pipe = DiffusionPipeline.from_pretrained("stabilityai/sdxl-turbo", torch_dtype=torch.float16, variant="fp16")
-        # pipe = DiffusionPipeline.from_pretrained(path, torch_dtype=torch.float16, variant="fp16")
+        path = "./sdxl-turbo"
+        # pipe = DiffusionPipeline.from_pretrained("stabilityai/sdxl-turbo", torch_dtype=torch.float16, variant="fp16")
+        pipe = DiffusionPipeline.from_pretrained(path, torch_dtype=torch.float16, variant="fp16")
         pipe.to(device)
         pipe.generate_ip_adapter_embeds = generate_ip_adapter_embeds.__get__(pipe)
         # load ip adapter
         pipe.load_ip_adapter(
-            "h94/IP-Adapter", subfolder="sdxl_models", 
+            "./IP_Adapter", #"h94/IP-Adapter", 
+            subfolder="sdxl_models", 
             weight_name="ip-adapter_sdxl_vit-h.safetensors", 
             torch_dtype=torch.float16)
         # set ip_adapter scale (defauld is 1)

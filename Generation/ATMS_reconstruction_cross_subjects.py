@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch.nn as nn
 import torchvision.transforms as transforms
-import tqdm
+from tqdm import tqdm
 from eegdatasets_leaveone import EEGDataset
 
 from einops.layers.torch import Rearrange, Reduce
@@ -207,8 +207,11 @@ def train_model(sub, eeg_model, dataloader, optimizer, device, text_features_all
         optimizer.zero_grad()
         
         batch_size = eeg_data.size(0)  # Assume the first element is the data tensor
-        subject_id = extract_id_from_string(sub)
+        # subject_id = extract_id_from_string(sub)
+        # if subject_id is None:
+        #     subject_id = -1  # Assign a default value when no subject exclusion is specified
         # eeg_data = eeg_data.permute(0, 2, 1)
+        subject_id = 1
         subject_ids = torch.full((batch_size,), subject_id, dtype=torch.long).to(device)
         # if not config.insubject:
         #     subject_ids = torch.full((batch_size,), -1, dtype=torch.long).to(device)     
@@ -257,7 +260,7 @@ def main_train_loop(sub, current_time, eeg_model, train_dataloader, test_dataloa
     best_epoch_info = {}
     results = []  # List to store results for each epoch
     
-    for epoch in range(config.epochs):
+    for epoch in tqdm(range(config.epochs)):
         # Train the model
         train_loss, train_accuracy, features_tensor = train_model(sub, eeg_model, train_dataloader, optimizer, device, text_features_train_all, img_features_train_all, config=config)
         if (epoch +1) % 5 == 0:                    
