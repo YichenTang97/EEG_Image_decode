@@ -17,6 +17,14 @@ cuda_device_count = torch.cuda.device_count()
 # print(cuda_device_count)
 # print('eeg_datasets_leaveone.py been imported')
 
+chan_order = ['Fp1', 'Fp2', 'AF7', 'AF3', 'AFz', 'AF4', 'AF8', 'F7', 'F5', 'F3',
+                'F1', 'F2', 'F4', 'F6', 'F8', 'FT9', 'FT7', 'FC5', 'FC3', 'FC1', 
+                'FCz', 'FC2', 'FC4', 'FC6', 'FT8', 'FT10', 'T7', 'C5', 'C3', 'C1',
+                'Cz', 'C2', 'C4', 'C6', 'T8', 'TP9', 'TP7', 'CP5', 'CP3', 'CP1', 
+                'CPz', 'CP2', 'CP4', 'CP6', 'TP8', 'TP10', 'P7', 'P5', 'P3', 'P1',
+                'Pz', 'P2', 'P4', 'P6', 'P8', 'PO7', 'PO3', 'POz', 'PO4', 'PO8',
+                'O1', 'Oz', 'O2']
+
 # Singleton class to manage shared resources
 class SharedResources:
     _instance = None
@@ -55,7 +63,7 @@ class EEGDataset():
     """
     subjects = ['sub-01', 'sub-02', 'sub-05', 'sub-04', 'sub-03', 'sub-06', 'sub-07', 'sub-08', 'sub-09', 'sub-10']
     """
-    def __init__(self, data_path, exclude_subject=None, subjects=None, train=True, time_window=[0, 1.0], classes = None, pictures = None, val_size=None):
+    def __init__(self, data_path, exclude_subject=None, subjects=None, train=True, time_window=[0, 1.0], classes=None, pictures=None, val_size=None, channels=None):
         self.data_path = data_path
         self.train = train
         self.subject_list = os.listdir(data_path)
@@ -67,12 +75,15 @@ class EEGDataset():
         self.pictures = pictures
         self.exclude_subject = exclude_subject  
         self.val_size = val_size
+        self.channels = channels if channels is not None else chan_order
         # assert any subjects in subject_list
         assert any(sub in self.subject_list for sub in self.subjects)
 
         self.data, self.labels, self.text, self.img = self.load_data()
         
         self.data = self.extract_eeg(self.data, time_window)
+
+        print(f"Data tensor shape: {self.data.shape}, label tensor shape: {self.labels.shape}, text length: {len(self.text)}, image length: {len(self.img)}")
         
         shared_resources = SharedResources()
         self.device = shared_resources.device
@@ -295,7 +306,7 @@ class EEGDataset():
         self.times = times
         self.ch_names = ch_names
 
-        print(f"Data tensor shape: {data_tensor.shape}, label tensor shape: {label_tensor.shape}, text length: {len(texts)}, image length: {len(images)}")
+        # print(f"Data tensor shape: {data_tensor.shape}, label tensor shape: {label_tensor.shape}, text length: {len(texts)}, image length: {len(images)}")
         
         return data_tensor, label_tensor, texts, images
 
@@ -305,13 +316,12 @@ class EEGDataset():
 
         # Get the indices of the times within the specified window
         indices = (self.times >= start) & (self.times <= end)
-        # print("self.times", self.times.shape)
-        # print("indices", indices)
-        # print("indices", indices.shape)
-        # print("eeg_data", eeg_data.shape)
+
+        # Select the specified channels
+        channel_indices = [self.ch_names.index(ch) for ch in self.channels if ch in self.ch_names]
+
         # Use these indices to select the corresponding data
-        extracted_data = eeg_data[..., indices]
-        # print(f"extracted_data shape: {extracted_data.shape}")
+        extracted_data = eeg_data[:, channel_indices, :][..., indices]
 
         return extracted_data
     

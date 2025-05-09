@@ -58,12 +58,13 @@ class Config:
         self.enc_in = 63                   # Encoder input dimension (example value)
 
 class iTransformer(nn.Module):
-    def __init__(self, configs, joint_train=False,  num_subjects=10):
+    def __init__(self, configs, joint_train=False,  num_subjects=10, num_channels=63):
         super(iTransformer, self).__init__()
         self.task_name = configs.task_name
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
         self.output_attention = configs.output_attention
+        self.num_channels = num_channels
         # Embedding
         self.enc_embedding = DataEmbedding(configs.seq_len, configs.d_model, configs.embed, configs.freq, configs.dropout, joint_train=False, num_subjects=num_subjects)
         # Encoder
@@ -87,12 +88,12 @@ class iTransformer(nn.Module):
         # Embedding
         enc_out = self.enc_embedding(x_enc, x_mark_enc, subject_ids)
         enc_out, attns = self.encoder(enc_out, attn_mask=None)
-        enc_out = enc_out[:, :63, :]      
+        enc_out = enc_out[:, :self.num_channels, :]      
         # print("enc_out", enc_out.shape)
         return enc_out
 
 class PatchEmbedding(nn.Module):
-    def __init__(self, emb_size=40):
+    def __init__(self, emb_size=40, num_channels=63):
         super().__init__()
         # Revised from ShallowNet
         self.tsconv = nn.Sequential(
@@ -100,7 +101,7 @@ class PatchEmbedding(nn.Module):
             nn.AvgPool2d((1, 51), (1, 5)),
             nn.BatchNorm2d(40),
             nn.ELU(),
-            nn.Conv2d(40, 40, (63, 1), stride=(1, 1)),
+            nn.Conv2d(40, 40, (num_channels, 1), stride=(1, 1)),  # Adjust kernel size dynamically
             nn.BatchNorm2d(40),
             nn.ELU(),
             nn.Dropout(0.5),
@@ -112,13 +113,9 @@ class PatchEmbedding(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        # b, _, _, _ = x.shape
         x = x.unsqueeze(1)     
-        # print("x", x.shape)   
         x = self.tsconv(x)
-        # print("tsconv", x.shape)   
         x = self.projection(x)
-        # print("projection", x.shape)  
         return x
 
 class ResidualAdd(nn.Module):
@@ -141,9 +138,9 @@ class FlattenHead(nn.Sequential):
         return x
 
 class Enc_eeg(nn.Sequential):
-    def __init__(self, emb_size=40, **kwargs):
+    def __init__(self, emb_size=40, num_channels=63, **kwargs):
         super().__init__(
-            PatchEmbedding(emb_size),
+            PatchEmbedding(emb_size, num_channels),
             FlattenHead()
         )
 
@@ -163,21 +160,16 @@ class ATMS(nn.Module):
     def __init__(self, num_channels=63, sequence_length=250, num_subjects=2, num_features=64, num_latents=1024, num_blocks=1):
         super(ATMS, self).__init__()
         default_config = Config()
-        self.encoder = iTransformer(default_config)   
+        self.encoder = iTransformer(default_config, num_channels=num_channels)   
         self.subject_wise_linear = nn.ModuleList([nn.Linear(default_config.d_model, sequence_length) for _ in range(num_subjects)])
-        self.enc_eeg = Enc_eeg()
+        self.enc_eeg = Enc_eeg(num_channels=num_channels)
         self.proj_eeg = Proj_eeg()        
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.loss_func = ClipLoss()       
          
     def forward(self, x, subject_ids):
         x = self.encoder(x, None, subject_ids)
-        # print(f'After attention shape: {x.shape}')
-        # print("x", x.shape)
-        # x = self.subject_wise_linear[0](x)
-        # print(f'After subject-specific linear transformation shape: {x.shape}')
         eeg_embedding = self.enc_eeg(x)
-        
         out = self.proj_eeg(eeg_embedding)
         return out  
 
@@ -266,12 +258,12 @@ def main_train_loop(sub, current_time, eeg_model, train_dataloader, test_dataloa
         if (epoch +1) % 5 == 0:                    
             # Save the model every 5 epochs                  
             if config.insubject==True:       
-                os.makedirs(f"./models/contrast/{config.encoder_type}/{sub}/{current_time}", exist_ok=True)             
-                file_path = f"./models/contrast/{config.encoder_type}/{sub}/{current_time}/{epoch+1}.pth"
+                os.makedirs(f"./models/contrast/ATMS/{sub}/{current_time}", exist_ok=True)             
+                file_path = f"./models/contrast/ATMS/{sub}/{current_time}/{epoch+1}.pth"
                 torch.save(eeg_model.state_dict(), file_path)            
             else:                
-                os.makedirs(f"./models/contrast/across/{config.encoder_type}/{current_time}", exist_ok=True)             
-                file_path = f"./models/contrast/across/{config.encoder_type}/{current_time}/{epoch+1}.pth"
+                os.makedirs(f"./models/contrast/across/ATMS/{current_time}", exist_ok=True)             
+                file_path = f"./models/contrast/across/ATMS/{current_time}/{epoch+1}.pth"
                 torch.save(eeg_model.state_dict(), file_path)
             print(f"Model saved in {file_path}!")
         train_losses.append(train_loss)
@@ -327,6 +319,7 @@ def main():
     parser = argparse.ArgumentParser(description='EEG Transformer Training Script')
     parser.add_argument('--data_path', type=str, default="./../Preprocessed_data_250Hz", help='Path to the EEG dataset')
     parser.add_argument('--output_dir', type=str, default='./outputs/contrast', help='Directory to save output results')    
+    parser.add_argument('--channels_conf', type=str, default='none', help='Configuration file for EEG channels to use (default: none, use all channels)')
     parser.add_argument('--project', type=str, default="train_pos_img_text_rep", help='WandB project name')
     parser.add_argument('--entity', type=str, default="sustech_rethinkingbci", help='WandB entity name')
     parser.add_argument('--name', type=str, default="lr=3e-4_img_pos_pro_eeg", help='Experiment name')
@@ -337,7 +330,6 @@ def main():
     parser.add_argument('--gpu', type=str, default='cuda:0', help='GPU device to use')
     parser.add_argument('--device', type=str, choices=['cpu', 'gpu'], default='gpu', help='Device to run on (cpu or gpu)')    
     parser.add_argument('--insubject', type=bool, default=False, help='In-subject mode or cross-subject mode')
-    parser.add_argument('--encoder_type', type=str, default='ATMS', help='Encoder type')
     parser.add_argument('--subjects', nargs='+', default=['sub-01', 'sub-02', 'sub-03', 'sub-04', 'sub-05', 'sub-06', 'sub-07', 'sub-08', 'sub-09', 'sub-10'], help='List of subject IDs (default: sub-01 to sub-10)')    
     args = parser.parse_args()
 
@@ -350,14 +342,22 @@ def main():
     subjects = args.subjects        
     current_time = datetime.datetime.now().strftime("%m-%d_%H-%M")
 
+    channels = []
+    if args.channels_conf != 'none':
+        with open(args.channels_conf, 'r') as f:
+            channels = [line.strip() for line in f.readlines()]
+        print(f'Using channels configuration from {args.channels_conf}')
+        print(f'Channels used: {channels}')
+    num_channels = len(channels) if channels else 63  # Default to 63 channels if none specified
+
     # for sub in subjects:
     sub = 'sub_mock'
-    eeg_model = globals()[args.encoder_type]()
+    eeg_model = ATMS(num_channels=num_channels, sequence_length=250)
     eeg_model.to(device)
 
     optimizer = AdamW(itertools.chain(eeg_model.parameters()), lr=args.lr)
 
-    train_dataset = EEGDataset(args.data_path, subjects=subjects, train=True)
+    train_dataset = EEGDataset(args.data_path, subjects=subjects, train=True, channels=channels)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0, drop_last=True)
 
     text_features_train_all = train_dataset.text_features
@@ -367,10 +367,17 @@ def main():
                                 text_features_train_all, None, img_features_train_all, None, config=args, logger=args.logger)
 
     # Save results to a CSV file
-    results_dir = os.path.join(args.output_dir, args.encoder_type, sub, current_time)
+    results_dir = os.path.join(args.output_dir, 'ATMS', sub, current_time)
     os.makedirs(results_dir, exist_ok=True)
 
-    results_file = f"{results_dir}/{args.encoder_type}_{sub}.csv"
+    # Save channels to a file if specified
+    if args.channels_conf != 'none':
+        channels_file = os.path.join(results_dir, "channels_used.txt")
+        with open(channels_file, 'w') as file:
+            file.write("\n".join(channels))
+        print(f'Channels saved to {channels_file}')
+
+    results_file = f"{results_dir}/ATMS_{sub}.csv"
 
     with open(results_file, 'w', newline='') as file:
         writer = csv.DictWriter(file, fieldnames=results[0].keys())
