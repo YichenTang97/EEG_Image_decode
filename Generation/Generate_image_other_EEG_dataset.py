@@ -9,6 +9,9 @@ from PIL import Image
 from torchvision import transforms
 import open_clip
 import einops
+import argparse
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, matthews_corrcoef, confusion_matrix
+from collections import defaultdict
 
 class EEGDatasetOther(Dataset):
     def __init__(self, data_path, train=True):
@@ -87,6 +90,12 @@ def compute_eeg_embeddings_other(eeg_model, dataloader, device):
     return torch.cat(embeddings, dim=0), labels
 
 def main():
+    parser = argparse.ArgumentParser(description="EEG Image Generation or Classification")
+    parser.add_argument("--task", type=str, default="generate", choices=["generate", "classify"], help="Task to perform: 'generate' or 'classify'")
+    args = parser.parse_args()
+
+    assert args.task in ["generate", "classify"], "Invalid task. Choose either 'generate' or 'classify'."
+
     experiment_id = "mbt_250411_data_250509"  # Configurable experiment ID
     experiment_folder = f"./experiment_{experiment_id}"
 
@@ -136,18 +145,89 @@ def main():
         pipe.train(embedding_loader, num_epochs=150, learning_rate=1e-3)
         torch.save(pipe.diffusion_prior.state_dict(), save_path)
 
-    print('Generating images...')
-    generator = Generator4Embeds(num_inference_steps=50, device=device)
+    if args.task == "generate":
+        print('Generating images...')
+        generator = Generator4Embeds(num_inference_steps=50, device=device)
 
-    for k in range(len(emb_eeg_test)):
-        eeg_embeds = emb_eeg_test[k:k+1]
-        label = labels_test[k]
-        h = pipe.generate(c_embeds=eeg_embeds, num_inference_steps=50, guidance_scale=5.0)
-        for j in range(10):
-            image = generator.generate(h.to(dtype=torch.float16))
-            image_path = os.path.join(generated_images_folder, f"trial_{k}_label_{label}_gen_{j}.png")
-            image.save(image_path)
-            print(f"Image saved to {image_path}")
+        for k in range(len(emb_eeg_test)):
+            eeg_embeds = emb_eeg_test[k:k+1]
+            label = labels_test[k]
+            h = pipe.generate(c_embeds=eeg_embeds, num_inference_steps=50, guidance_scale=5.0)
+            for j in range(10):
+                image = generator.generate(h.to(dtype=torch.float16))
+                image_path = os.path.join(generated_images_folder, f"trial_{k}_label_{label}_gen_{j}.png")
+                image.save(image_path)
+                print(f"Image saved to {image_path}")
+    elif args.task == "classify":
+        print('Computing image embeddings for all classes...')
+        unique_train_labels = list(set(labels_train))
+        emb_img_classes = compute_image_embeddings(stimuli_folder, unique_train_labels, device)
+
+        print('Classifying EEG embeddings...')
+        predictions = []
+        scores = []
+        for idx, eeg_embed in enumerate(emb_eeg_test):
+            # Compute logits for classification
+            logit_scale = eeg_model.logit_scale
+            logits_img = logit_scale * eeg_embed @ emb_img_classes.T
+            logits_single = logits_img
+
+            # Predict the class
+            predicted_class_idx = torch.argmax(logits_single).item()
+            predicted_class = unique_train_labels[predicted_class_idx]
+            predictions.append(predicted_class)
+            scores.append(logits_single.cpu().detach().numpy())
+
+        print('Evaluating classification results...')
+        y_true = labels_test
+        y_pred = predictions
+
+        acc = accuracy_score(y_true, y_pred)
+        bal_acc = balanced_accuracy_score(y_true, y_pred)
+        f1 = f1_score(y_true, y_pred, average='weighted')
+        mcc = matthews_corrcoef(y_true, y_pred)
+        conf_matrix = confusion_matrix(y_true, y_pred, labels=unique_train_labels)
+
+        print('Logging results...')
+        results_path = os.path.join(experiment_folder, "classification_results.txt")
+        with open(results_path, "w") as f:
+            f.write(f"Accuracy: {acc}\n")
+            f.write(f"Balanced Accuracy: {bal_acc}\n")
+            f.write(f"F1 Score: {f1}\n")
+            f.write(f"MCC: {mcc}\n")
+            f.write(f"Confusion Matrix:\n{conf_matrix}\n")
+            f.write(f"Class/Label Order: {unique_train_labels}\n")
+
+        print('Computing class-wise scores...')
+        class_wise_results = defaultdict(dict)
+        for class_label in set(y_true):
+            class_indices = [i for i, label in enumerate(y_true) if label == class_label]
+            y_true_class = [y_true[i] for i in class_indices]
+            y_pred_class = [y_pred[i] for i in class_indices]
+
+            class_acc = accuracy_score(y_true_class, y_pred_class)
+            class_f1 = f1_score(y_true_class, y_pred_class, average='weighted')
+            class_mcc = matthews_corrcoef(y_true_class, y_pred_class)
+
+            class_wise_results[class_label]['accuracy'] = class_acc
+            class_wise_results[class_label]['f1_score'] = class_f1
+            class_wise_results[class_label]['mcc'] = class_mcc
+
+        print('Logging class-wise results...')
+        class_wise_results_path = os.path.join(experiment_folder, "class_wise_results.txt")
+        with open(class_wise_results_path, "w") as f:
+            for class_label, metrics in class_wise_results.items():
+                f.write(f"Class {class_label}:\n")
+                f.write(f"  Accuracy: {metrics['accuracy']}\n")
+                f.write(f"  F1 Score: {metrics['f1_score']}\n")
+                f.write(f"  MCC: {metrics['mcc']}\n")
+                f.write("\n")
+        print(f"Class-wise results saved to {class_wise_results_path}")
+
+        print('Saving predictions and scores...')
+        predictions_scores_path = os.path.join(experiment_folder, "predictions_and_scores.npy")
+        np.save(predictions_scores_path, {"predictions": predictions, "scores": scores})
+        print(f"Results saved to {results_path} and {predictions_scores_path}")
 
 if __name__ == "__main__":
     main()
