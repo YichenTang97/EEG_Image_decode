@@ -33,3 +33,4 @@ Retrieval/wandb
 *.cache/
 images_set/
 Preprocessed_data_250Hz/
+Generation/experiment*
