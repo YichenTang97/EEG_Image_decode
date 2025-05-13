@@ -7,6 +7,7 @@ from torch.optim import Adam
 from torch.utils.data import DataLoader
 from itertools import combinations
 import clip
+import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 import torch.nn as nn
@@ -198,16 +199,127 @@ def compute_eeg_embeddings(eeg_model, dataloader, device, sub):
     with torch.no_grad():
         for eeg_data, _, _, _, img, _ in dataloader:
             eeg_data = eeg_data.to(device)
-            subject_id = extract_id_from_string(sub)
+            subject_id = 1 # extract_id_from_string(sub)
             subject_ids = torch.full((eeg_data.size(0),), subject_id, dtype=torch.long).to(device)
             embeddings.append(eeg_model(eeg_data, subject_ids))
             labels.extend([os.path.splitext(os.path.basename(i))[0] for i in img])
     return torch.cat(embeddings, dim=0), labels
 
+def evaluate_model(sub, eeg_model, dataloader, device, text_features_all, img_features_all, k):
+    eeg_model.eval()
+
+    text_features_all = text_features_all.to(device).float()
+    img_features_all = img_features_all.to(device).float()
+    total_loss = 0
+    correct = 0
+    total = 0
+    alpha = 0.99
+    top5_correct = 0
+    top5_correct_count = 0
+    all_labels = set(range(text_features_all.size(0)))
+    top5_acc = 0
+    mse_loss_fn = nn.MSELoss()
+    with torch.no_grad():
+        for batch_idx, (eeg_data, labels, text, text_features, img, img_features) in enumerate(dataloader):
+            eeg_data = eeg_data.to(device)
+            text_features = text_features.to(device).float()
+            labels = labels.to(device)
+            img_features = img_features.to(device).float()
+            
+            batch_size = eeg_data.size(0)  # Assume the first element is the data tensor
+            subject_id = extract_id_from_string(sub)
+            # eeg_data = eeg_data.permute(0, 2, 1)
+            subject_ids = torch.full((batch_size,), subject_id, dtype=torch.long).to(device)
+            # if not config.insubject:
+            #     subject_ids = torch.full((batch_size,), -1, dtype=torch.long).to(device)          
+            eeg_features = eeg_model(eeg_data, subject_ids)
+
+        
+            logit_scale = eeg_model.logit_scale 
+            # print(eeg_features.type, text_features.type, img_features.type)
+            img_loss = eeg_model.loss_func(eeg_features, img_features, logit_scale)
+            text_loss = eeg_model.loss_func(eeg_features, text_features, logit_scale)
+            regress_loss =  mse_loss_fn(eeg_features, img_features)
+            loss = (alpha * regress_loss *10 + (1 - alpha) * img_loss*10)
+                
+            total_loss += loss.item()
+            
+            for idx, label in enumerate(labels):
+                # First select k-1 classes excluding the correct class
+                possible_classes = list(all_labels - {label.item()})
+                selected_classes = random.sample(possible_classes, k-1) + [label.item()]
+                selected_img_features = img_features_all[selected_classes]
+                selected_text_features = text_features_all[selected_classes]
+                
+                if k==200:
+                    # Compute corresponding logits
+                    logits_img = logit_scale * eeg_features[idx] @ selected_img_features.T
+                    logits_single = logits_img
+                    # print("logits_single", logits_single.shape)
+                    # Get predicted class
+                    # predicted_label = selected_classes[torch.argmax(logits_single).item()]
+                    predicted_label = selected_classes[torch.argmax(logits_single).item()] # (n_batch, ) ∈ {0, 1, ..., n_cls-1}
+                    if predicted_label == label.item():
+                        # print("predicted_label", predicted_label)
+                        correct += 1
+                    
+                    # logits_single is the model output, assumed to be shape (n_batch, n_classes)
+                    # label is the true label, shape (n_batch,)
+                    # Get top-5 predicted indices
+                    # print("logits_single", logits_single)
+                    _, top5_indices = torch.topk(logits_single, 5, largest =True)
+                                                           
+                    # Check if true label is in top-5 predictions
+                    if label.item() in [selected_classes[i] for i in top5_indices.tolist()]:                
+                        top5_correct_count+=1                                
+                    total += 1
+                elif k == 50 or k == 100:
+                    # For k=50 or 100, select k classes for evaluation
+                    selected_classes = random.sample(possible_classes, k-1) + [label.item()]
+
+                    logits_img = logit_scale * eeg_features[idx] @ selected_img_features.T
+                    logits_single = logits_img
+                    
+                    predicted_label = selected_classes[torch.argmax(logits_single).item()]
+                    if predicted_label == label.item():
+                        correct += 1
+                    _, top5_indices = torch.topk(logits_single, 5, largest =True)
+                                                           
+                    # Check if true label is in top-5 predictions
+                    if label.item() in [selected_classes[i] for i in top5_indices.tolist()]:                
+                        top5_correct_count+=1                                
+                    total += 1
+                elif k==2 or k==4 or k==10:
+                    selected_classes = random.sample(possible_classes, k-1) + [label.item()]
+                    # Compute corresponding logits
+                    logits_img = logit_scale * eeg_features[idx] @ selected_img_features.T
+                    # logits_text = logit_scale * eeg_features[idx] @ selected_text_features.T
+                    # logits_single = (logits_text + logits_img) / 2.0
+                    logits_single = logits_img
+                    # print("logits_single", logits_single.shape)
+                    # Get predicted class
+                    # predicted_label = selected_classes[torch.argmax(logits_single).item()]
+                    predicted_label = selected_classes[torch.argmax(logits_single).item()] # (n_batch, ) ∈ {0, 1, ..., n_cls-1}
+                    if predicted_label == label.item():
+                        correct += 1
+                    total += 1
+                else:
+                    print("Error.")
+            del eeg_data, eeg_features, img_features
+    average_loss = total_loss / (batch_idx+1)
+    accuracy = correct / total
+    top5_acc = top5_correct_count / total
+    return average_loss, accuracy, top5_acc
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="EEG Image Generation or Classification")
+    parser.add_argument("--task", type=str, default="generate", choices=["generate", "retrival"], help="Task to perform: 'generate' or 'retrival'")
+    args = parser.parse_args()
+
+    assert args.task in ["generate", "retrival"], "Invalid task. Choose either 'generate' or 'retrival'."
     sub = "sub-08"
     data_path = "./../Preprocessed_data_250Hz"
-    output_path = f"./fintune_ckpts/{sub}/"
+    output_path = f"./fintune_ckpts/across/{sub}/"
     os.makedirs(output_path, exist_ok=True)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -220,7 +332,7 @@ if __name__ == "__main__":
 
     print('Loading EEG model...')
     eeg_model = ATMS(63, 250)
-    eeg_model.load_state_dict(torch.load(f"models/contrast/ATMS/{sub}/05-05_12-08/40.pth"))
+    eeg_model.load_state_dict(torch.load(f"models/contrast/across/exclude_sub-08/ATMS/05-11_09-48/40.pth"))
     eeg_model = eeg_model.to(device)
 
     print('Computing EEG embeddings...')
@@ -254,18 +366,54 @@ if __name__ == "__main__":
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         torch.save(pipe.diffusion_prior.state_dict(), save_path)
 
-    print('Generating images...')
-    generator = Generator4Embeds(num_inference_steps=50, device=device)
-    output_dir = f"./generated_imgs/{sub}/"
-    os.makedirs(output_dir, exist_ok=True)
+    if args.task == "generate":
+        print('Generating images...')
+        generator = Generator4Embeds(num_inference_steps=50, device=device)
+        output_dir = f"./generated_imgs/across/{sub}/"
+        os.makedirs(output_dir, exist_ok=True)
 
-    for k in range(200):
-        eeg_embeds = emb_eeg_test[k:k+1]
-        label = labels_test[k]
-        h = pipe.generate(c_embeds=eeg_embeds, num_inference_steps=50, guidance_scale=5.0)
-        print(f"Generated embedding for label {label}")
-        for j in range(10):
-            image = generator.generate(h.to(dtype=torch.float16))
-            image_path = os.path.join(output_dir, f"trial_{k}_label_{label}_gen_{j}.png")
-            image.save(image_path)
-            print(f"Image saved to {image_path}")
+        for k in range(200):
+            eeg_embeds = emb_eeg_test[k:k+1]
+            label = labels_test[k]
+            h = pipe.generate(c_embeds=eeg_embeds, num_inference_steps=50, guidance_scale=5.0)
+            print(f"Generated embedding for label {label}")
+            for j in range(10):
+                image = generator.generate(h.to(dtype=torch.float16))
+                image_path = os.path.join(output_dir, f"trial_{k}_label_{label}_gen_{j}.png")
+                image.save(image_path)
+                print(f"Image saved to {image_path}")
+    elif args.task == "retrival":
+        output_dir = f"./outputs/contrast/"
+        os.makedirs(output_dir, exist_ok=True)
+        # Evaluate the model
+        test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=True, num_workers=0, drop_last=True)
+        text_features_test_all = test_dataset.text_features
+        img_features_test_all = test_dataset.img_features
+        test_loss, test_accuracy, top5_acc = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all,k=200)
+        _, v2_acc, _ = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all, k = 2)
+        _, v4_acc, _ = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all, k = 4)
+        _, v10_acc, _ = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all, k = 10)
+        _, v50_acc, v50_top5_acc = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all,  k=50)
+        _, v100_acc, v100_top5_acc = evaluate_model(sub, eeg_model, test_dataloader, device, text_features_test_all, img_features_test_all,  k=100)
+
+        # Save results to a CSV file
+        current_time = datetime.datetime.now().strftime("%m-%d_%H-%M")
+        results_dir = os.path.join(output_dir, 'ATMS', sub, current_time)
+        os.makedirs(results_dir, exist_ok=True)
+
+        results_file = os.path.join(results_dir, "retrieval_scores.csv")
+        with open(results_file, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(["Metric", "Value"])
+            writer.writerow(["Test Loss", test_loss])
+            writer.writerow(["Test Accuracy", test_accuracy])
+            writer.writerow(["Top-5 Accuracy", top5_acc])
+            writer.writerow(["k=2 Accuracy", v2_acc])
+            writer.writerow(["k=4 Accuracy", v4_acc])
+            writer.writerow(["k=10 Accuracy", v10_acc])
+            writer.writerow(["k=50 Accuracy", v50_acc])
+            writer.writerow(["k=50 Top-5 Accuracy", v50_top5_acc])
+            writer.writerow(["k=100 Accuracy", v100_acc])
+            writer.writerow(["k=100 Top-5 Accuracy", v100_top5_acc])
+
+        print(f"Retrieval scores saved to {results_file}")

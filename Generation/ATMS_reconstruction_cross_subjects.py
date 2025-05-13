@@ -40,6 +40,8 @@ import argparse
 from torch import nn
 from torch.optim import AdamW
 
+submock = 'sub_mock'
+
 class Config:
     def __init__(self):
         self.task_name = 'classification'  # Example task name
@@ -261,9 +263,13 @@ def main_train_loop(sub, current_time, eeg_model, train_dataloader, test_dataloa
                 os.makedirs(f"./models/contrast/ATMS/{sub}/{current_time}", exist_ok=True)             
                 file_path = f"./models/contrast/ATMS/{sub}/{current_time}/{epoch+1}.pth"
                 torch.save(eeg_model.state_dict(), file_path)            
-            else:                
+            elif sub == submock:                
                 os.makedirs(f"./models/contrast/across/ATMS/{current_time}", exist_ok=True)             
                 file_path = f"./models/contrast/across/ATMS/{current_time}/{epoch+1}.pth"
+                torch.save(eeg_model.state_dict(), file_path)
+            else:
+                os.makedirs(f"./models/contrast/across/exclude_{sub}/ATMS/{current_time}", exist_ok=True)             
+                file_path = f"./models/contrast/across/exclude_{sub}/ATMS/{current_time}/{epoch+1}.pth"
                 torch.save(eeg_model.state_dict(), file_path)
             print(f"Model saved in {file_path}!")
         train_losses.append(train_loss)
@@ -331,6 +337,7 @@ def main():
     parser.add_argument('--device', type=str, choices=['cpu', 'gpu'], default='gpu', help='Device to run on (cpu or gpu)')    
     parser.add_argument('--insubject', type=bool, default=False, help='In-subject mode or cross-subject mode')
     parser.add_argument('--subjects', nargs='+', default=['sub-01', 'sub-02', 'sub-03', 'sub-04', 'sub-05', 'sub-06', 'sub-07', 'sub-08', 'sub-09', 'sub-10'], help='List of subject IDs (default: sub-01 to sub-10)')    
+    parser.add_argument('--exclude', type=str, default='none', help='Subject ID to exclude (default: none)')
     args = parser.parse_args()
 
     # Set device based on the argument
@@ -342,16 +349,21 @@ def main():
     subjects = args.subjects        
     current_time = datetime.datetime.now().strftime("%m-%d_%H-%M")
 
-    channels = []
+    channels = None
     if args.channels_conf != 'none':
         with open(args.channels_conf, 'r') as f:
             channels = [line.strip() for line in f.readlines()]
         print(f'Using channels configuration from {args.channels_conf}')
         print(f'Channels used: {channels}')
-    num_channels = len(channels) if channels else 63  # Default to 63 channels if none specified
+    num_channels = len(channels) if args.channels_conf != 'none' else 63  # Default to 63 channels if none specified
 
     # for sub in subjects:
-    sub = 'sub_mock'
+    sub = submock if args.exclude == 'none' else args.exclude
+    if args.exclude != 'none':
+        subjects.remove(args.exclude)
+        print(f'Excluding subject {args.exclude} from training')
+    else:
+        print(f'Using all subjects for training: {subjects}')
     eeg_model = ATMS(num_channels=num_channels, sequence_length=250)
     eeg_model.to(device)
 
