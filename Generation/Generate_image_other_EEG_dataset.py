@@ -92,6 +92,8 @@ def compute_eeg_embeddings_other(eeg_model, dataloader, device):
 def main():
     parser = argparse.ArgumentParser(description="EEG Image Generation or Classification")
     parser.add_argument("--task", type=str, default="generate", choices=["generate", "classify"], help="Task to perform: 'generate' or 'classify'")
+    parser.add_argument("--classify_with_prior", action="store_true", help="Use diffusion prior for classification")
+    parser.add_argument("--regenerate_stimuli", action="store_true", help="Regenerate stimuli images")
     args = parser.parse_args()
 
     assert args.task in ["generate", "classify"], "Invalid task. Choose either 'generate' or 'classify'."
@@ -127,6 +129,26 @@ def main():
     emb_eeg_test, labels_test = compute_eeg_embeddings_other(eeg_model, test_loader, device)
 
     emb_img_train = compute_image_embeddings(stimuli_folder, labels_train, device)
+
+    if args.regenerate_stimuli:
+        print('Regenerating images for each unique class...')
+
+        # Compute embeddings for unique classes
+        unique_labels = list(set(labels_train))
+        emb_img_classes = compute_image_embeddings(stimuli_folder, unique_labels, device)
+
+        # Create subfolder for regenerated stimuli
+        regenerated_stimuli_folder = os.path.join(experiment_folder, 'regenerated_stimuli')
+        os.makedirs(regenerated_stimuli_folder, exist_ok=True)
+
+        # Regenerate images for each class
+        generator = Generator4Embeds(num_inference_steps=50, device=device)
+        for class_idx, class_embed in enumerate(emb_img_classes):
+            for j in range(10):
+                image = generator.generate(class_embed.unsqueeze(0).to(dtype=torch.float16))
+                image_path = os.path.join(regenerated_stimuli_folder, f"class_{unique_labels[class_idx]}_gen_{j}.png")
+                image.save(image_path)
+                print(f"Regenerated image saved to {image_path}")
 
     print('Creating embedding dataset...')
     embedding_dataset = EmbeddingDataset(c_embeddings=emb_eeg_train, h_embeddings=emb_img_train)
@@ -167,6 +189,13 @@ def main():
         predictions = []
         scores = []
         for idx, eeg_embed in enumerate(emb_eeg_test):
+            if args.classify_with_prior:
+                # Use diffusion prior for classification
+                h = pipe.generate(c_embeds=eeg_embed.unsqueeze(0), num_inference_steps=50, guidance_scale=5.0).squeeze(0)
+                h = h.to(dtype=torch.float16)
+            else:
+                # Use EEG embedding directly
+                h = eeg_embed
             # Compute logits for classification
             logit_scale = eeg_model.logit_scale
             logits_img = logit_scale * eeg_embed @ emb_img_classes.T
@@ -189,7 +218,10 @@ def main():
         conf_matrix = confusion_matrix(y_true, y_pred, labels=unique_train_labels)
 
         print('Logging results...')
-        results_path = os.path.join(experiment_folder, "classification_results.txt")
+        if args.classify_with_prior:
+            results_path = os.path.join(experiment_folder, "classification_results_with_prior.txt")
+        else:
+            results_path = os.path.join(experiment_folder, "classification_results.txt")
         with open(results_path, "w") as f:
             f.write(f"Accuracy: {acc}\n")
             f.write(f"Balanced Accuracy: {bal_acc}\n")
@@ -214,7 +246,10 @@ def main():
             class_wise_results[class_label]['mcc'] = class_mcc
 
         print('Logging class-wise results...')
-        class_wise_results_path = os.path.join(experiment_folder, "class_wise_results.txt")
+        if args.classify_with_prior:
+            class_wise_results_path = os.path.join(experiment_folder, "class_wise_results_with_prior.txt")
+        else:
+            class_wise_results_path = os.path.join(experiment_folder, "class_wise_results.txt")
         with open(class_wise_results_path, "w") as f:
             for class_label, metrics in class_wise_results.items():
                 f.write(f"Class {class_label}:\n")
@@ -225,7 +260,10 @@ def main():
         print(f"Class-wise results saved to {class_wise_results_path}")
 
         print('Saving predictions and scores...')
-        predictions_scores_path = os.path.join(experiment_folder, "predictions_and_scores.npy")
+        if args.classify_with_prior:
+            predictions_scores_path = os.path.join(experiment_folder, "predictions_and_scores_with_prior.npy")
+        else:
+            predictions_scores_path = os.path.join(experiment_folder, "predictions_and_scores.npy")
         np.save(predictions_scores_path, {"predictions": predictions, "scores": scores})
         print(f"Results saved to {results_path} and {predictions_scores_path}")
 
