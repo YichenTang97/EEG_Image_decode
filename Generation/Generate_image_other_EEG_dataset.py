@@ -99,7 +99,7 @@ def main():
     assert args.task in ["generate", "classify"], "Invalid task. Choose either 'generate' or 'classify'."
 
     experiment_id = "mbt_250411_data_250509"  # Configurable experiment ID
-    experiment_folder = f"./experiment_{experiment_id}"
+    experiment_folder = f"./experiments/experiment_{experiment_id}"
 
     data_path = os.path.join(experiment_folder, 'whitened_eeg_data_for_li_ATM_reconstruct.npy')
     stimuli_folder = os.path.join(experiment_folder, 'stimuli_shapes')
