@@ -368,16 +368,16 @@ def evaluate_model(eeg_model, dataloader, device, precomputed_embeddings, valid_
 
 def main():
     parser = argparse.ArgumentParser(description='ATMS Training for EEG-Image Dataset')
-    parser.add_argument('--experiment_id', type=str, default='gtec_250527_data_250527', help='Experiment ID')
+    parser.add_argument('--experiment_id', type=str, default='gtec_250527_data_250527_train_from_scratch', help='Experiment ID')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=40, help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
     parser.add_argument('--device', type=str, default='cuda:0', help='Device to use')
     parser.add_argument('--save_every', type=int, default=5, help='Save model every N epochs')
     args = parser.parse_args()
 
     # Setup paths
-    experiment_folder = f"./experiment_{args.experiment_id}"
+    experiment_folder = f"./experiments/experiment_{args.experiment_id}"
     data_path = os.path.join(experiment_folder, 'whitened_eeg_data.npy')
     stimuli_folder = os.path.join(experiment_folder, 'image_pool')
     

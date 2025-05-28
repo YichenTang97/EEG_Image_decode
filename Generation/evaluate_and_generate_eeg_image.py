@@ -195,7 +195,7 @@ def main():
     """
     parser = argparse.ArgumentParser(description="EEG Image Generation and Retrieval Evaluation with ATMS")
     parser.add_argument("--task", type=str, default="evaluate", choices=["generate", "evaluate", "regenerate_stimuli"], help="Task to perform")
-    parser.add_argument("--experiment_id", type=str, default="gtec_250527_data_250527", help="Experiment ID")
+    parser.add_argument("--experiment_id", type=str, default="gtec_250527_data_250527_train_from_scratch", help="Experiment ID")
     parser.add_argument("--model_path", type=str, help="Path to trained ATMS model (if not provided, will use final_model.pth from latest training)")
     parser.add_argument("--evaluation_with_prior", action="store_true", help="Use diffusion prior for evaluation")
     parser.add_argument("--generate_without_prior", action="store_true", help="Generate images without diffusion prior")
@@ -203,7 +203,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use")
     args = parser.parse_args()
 
-    experiment_folder = f"./experiment_{args.experiment_id}"
+    experiment_folder = f"./experiments/experiment_{args.experiment_id}"
     data_path = os.path.join(experiment_folder, 'whitened_eeg_data.npy')
     stimuli_folder = os.path.join(experiment_folder, 'image_pool')
     diffusion_prior_folder = os.path.join(experiment_folder, 'diffusion_prior')
