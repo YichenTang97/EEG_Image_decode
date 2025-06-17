@@ -12,6 +12,7 @@ import einops
 import argparse
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, matthews_corrcoef, confusion_matrix
 from collections import defaultdict
+import datetime
 
 class EEGDatasetOther(Dataset):
     def __init__(self, data_path, train=True):
@@ -93,18 +94,30 @@ def main():
     parser = argparse.ArgumentParser(description="EEG Image Generation or Classification")
     parser.add_argument("--task", type=str, default="generate", choices=["generate", "classify"], help="Task to perform: 'generate' or 'classify'")
     parser.add_argument("--classify_with_prior", action="store_true", help="Use diffusion prior for classification")
+    parser.add_argument("--generate_without_prior", action="store_true", help="Generate images directly from EEG embeddings without diffusion prior")
     parser.add_argument("--regenerate_stimuli", action="store_true", help="Regenerate stimuli images")
+    parser.add_argument("--generation_repeats", type=int, default=3, help="Number of images to generate per trial")
+    parser.add_argument("--guidance_scale", type=float, default=50.0, help="Guidance scale for diffusion prior generation")
     args = parser.parse_args()
 
     assert args.task in ["generate", "classify"], "Invalid task. Choose either 'generate' or 'classify'."
 
-    experiment_id = "mbt_250411_data_250509"  # Configurable experiment ID
+    experiment_id = "biosemi_imagery_250414_data_250509"  # Configurable experiment ID
     experiment_folder = f"./experiments/experiment_{experiment_id}"
 
     data_path = os.path.join(experiment_folder, 'whitened_eeg_data_for_li_ATM_reconstruct.npy')
     stimuli_folder = os.path.join(experiment_folder, 'stimuli_shapes')
     diffusion_prior_folder = os.path.join(experiment_folder, 'diffusion_prior')
-    generated_images_folder = os.path.join(experiment_folder, 'generated_images')
+    
+    # Create timestamped folder for generated images
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    if args.task == "generate":
+        if args.generate_without_prior:
+            generated_images_folder = os.path.join(experiment_folder, f'generated_images_without_prior_{timestamp}')
+        else:
+            generated_images_folder = os.path.join(experiment_folder, f'generated_images_with_prior_{timestamp}')
+    else:
+        generated_images_folder = os.path.join(experiment_folder, 'generated_images')
 
     os.makedirs(diffusion_prior_folder, exist_ok=True)
     os.makedirs(generated_images_folder, exist_ok=True)
@@ -120,8 +133,8 @@ def main():
 
     print('Loading EEG model...')
     eeg_model = ATMS(num_channels=train_dataset.X.shape[1], sequence_length=250)
-    # eeg_model.load_state_dict(torch.load(f"./models/contrast/across/ATMS/05-08_19-24/40.pth")) # Biosemi
-    eeg_model.load_state_dict(torch.load(f"models/contrast/across/ATMS/05-08_17-41/40.pth")) # mbt
+    eeg_model.load_state_dict(torch.load(f"./models/contrast/across/ATMS/05-08_19-24/40.pth")) # Biosemi
+    # eeg_model.load_state_dict(torch.load(f"models/contrast/across/ATMS/05-08_17-41/40.pth")) # mbt
     eeg_model = eeg_model.to(device)
 
     print('Computing EEG embeddings...')
@@ -137,35 +150,41 @@ def main():
         unique_labels = list(set(labels_train))
         emb_img_classes = compute_image_embeddings(stimuli_folder, unique_labels, device)
 
-        # Create subfolder for regenerated stimuli
-        regenerated_stimuli_folder = os.path.join(experiment_folder, 'regenerated_stimuli')
+        # Create timestamped subfolder for regenerated stimuli
+        regenerated_stimuli_folder = os.path.join(experiment_folder, f'regenerated_stimuli_{timestamp}')
         os.makedirs(regenerated_stimuli_folder, exist_ok=True)
 
         # Regenerate images for each class
         generator = Generator4Embeds(num_inference_steps=50, device=device)
         for class_idx, class_embed in enumerate(emb_img_classes):
-            for j in range(10):
+            for j in range(args.generation_repeats):
                 image = generator.generate(class_embed.unsqueeze(0).to(dtype=torch.float16))
                 image_path = os.path.join(regenerated_stimuli_folder, f"class_{unique_labels[class_idx]}_gen_{j}.png")
                 image.save(image_path)
                 print(f"Regenerated image saved to {image_path}")
 
-    print('Creating embedding dataset...')
-    embedding_dataset = EmbeddingDataset(c_embeddings=emb_eeg_train, h_embeddings=emb_img_train)
-    embedding_loader = DataLoader(embedding_dataset, batch_size=64, shuffle=True, num_workers=0, pin_memory=False)
+    # Only setup diffusion prior if needed
+    diffusion_prior = None
+    pipe = None
+    if not args.generate_without_prior or args.classify_with_prior:
+        print('Creating embedding dataset...')
+        embedding_dataset = EmbeddingDataset(c_embeddings=emb_eeg_train, h_embeddings=emb_img_train)
+        embedding_loader = DataLoader(embedding_dataset, batch_size=64, shuffle=True, num_workers=0, pin_memory=False)
 
-    print('Setting up diffusion prior...')
-    diffusion_prior = DiffusionPriorUNet(cond_dim=1024, dropout=0.1).to(device)
-    pipe = Pipe(diffusion_prior, device=device)
+        print('Setting up diffusion prior...')
+        diffusion_prior = DiffusionPriorUNet(cond_dim=1024, dropout=0.1).to(device)
+        pipe = Pipe(diffusion_prior, device=device)
 
-    save_path = os.path.join(diffusion_prior_folder, "diffusion_prior.pt")
-    if os.path.exists(save_path):
-        print('Loading existing diffusion prior model...')
-        pipe.diffusion_prior.load_state_dict(torch.load(save_path))
+        save_path = os.path.join(diffusion_prior_folder, "diffusion_prior.pt")
+        if os.path.exists(save_path):
+            print('Loading existing diffusion prior model...')
+            pipe.diffusion_prior.load_state_dict(torch.load(save_path))
+        else:
+            print('Training diffusion prior...')
+            pipe.train(embedding_loader, num_epochs=150, learning_rate=1e-3)
+            torch.save(pipe.diffusion_prior.state_dict(), save_path)
     else:
-        print('Training diffusion prior...')
-        pipe.train(embedding_loader, num_epochs=150, learning_rate=1e-3)
-        torch.save(pipe.diffusion_prior.state_dict(), save_path)
+        print('Skipping diffusion prior setup (generating without prior)...')
 
     if args.task == "generate":
         print('Generating images...')
@@ -174,12 +193,32 @@ def main():
         for k in range(len(emb_eeg_test)):
             eeg_embeds = emb_eeg_test[k:k+1]
             label = labels_test[k]
-            h = pipe.generate(c_embeds=eeg_embeds, num_inference_steps=50, guidance_scale=5.0)
-            for j in range(10):
-                image = generator.generate(h.to(dtype=torch.float16))
-                image_path = os.path.join(generated_images_folder, f"trial_{k}_label_{label}_gen_{j}.png")
-                image.save(image_path)
-                print(f"Image saved to {image_path}")
+            
+            if args.generate_without_prior:
+                # Generate directly from EEG embeddings
+                print(f"Generating image {k+1}/{len(emb_eeg_test)} without diffusion prior...")
+                h = eeg_embeds.squeeze(0)  # Use EEG embedding directly
+                # Note: There might be dimension mismatches since EEG embeddings are 1024D 
+                # and the generator expects image embeddings which might have different dimensions
+                try:
+                    for j in range(args.generation_repeats):
+                        image = generator.generate(h.unsqueeze(0).to(dtype=torch.float16))
+                        image_path = os.path.join(generated_images_folder, f"trial_{k}_label_{label}_gen_{j}_no_prior.png")
+                        image.save(image_path)
+                        print(f"Image saved to {image_path}")
+                except Exception as e:
+                    print(f"Warning: Failed to generate image without prior for trial {k}: {e}")
+                    print("This might be due to dimension mismatches between EEG and image embeddings.")
+                    continue
+            else:
+                # Generate using diffusion prior (original method)
+                print(f"Generating image {k+1}/{len(emb_eeg_test)} with diffusion prior...")
+                h = pipe.generate(c_embeds=eeg_embeds, num_inference_steps=50, guidance_scale=args.guidance_scale)
+                for j in range(args.generation_repeats):
+                    image = generator.generate(h.to(dtype=torch.float16))
+                    image_path = os.path.join(generated_images_folder, f"trial_{k}_label_{label}_gen_{j}.png")
+                    image.save(image_path)
+                    print(f"Image saved to {image_path}")
     elif args.task == "classify":
         print('Computing image embeddings for all classes...')
         unique_train_labels = list(set(labels_train))
@@ -191,7 +230,7 @@ def main():
         for idx, eeg_embed in enumerate(emb_eeg_test):
             if args.classify_with_prior:
                 # Use diffusion prior for classification
-                h = pipe.generate(c_embeds=eeg_embed.unsqueeze(0), num_inference_steps=50, guidance_scale=5.0).squeeze(0)
+                h = pipe.generate(c_embeds=eeg_embed.unsqueeze(0), num_inference_steps=50, guidance_scale=args.guidance_scale).squeeze(0)
                 h = h.to(dtype=torch.float16)
             else:
                 # Use EEG embedding directly
