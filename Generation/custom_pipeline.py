@@ -458,7 +458,7 @@ def encode_image(image, image_encoder, feature_extractor, num_images_per_prompt=
 
 class Generator4Embeds:
 
-    def __init__(self, num_inference_steps=1, device='cuda') -> None:
+    def __init__(self, num_inference_steps=1, device='cuda', model='sdxl-turbo') -> None:
         import os
         os.environ['http_proxy'] = 'http://10.16.35.10:13390' 
         os.environ['https_proxy'] = 'http://10.16.35.10:13390' 
@@ -466,36 +466,119 @@ class Generator4Embeds:
         self.num_inference_steps = num_inference_steps
         self.dtype = torch.float16
         self.device = device
+        self.model = model
         
-        # path = '/home/weichen/.cache/huggingface/hub/models--stabilityai--sdxl-turbo/snapshots/f4b0486b498f84668e828044de1d0c8ba486e05b'
-        # path = "/home/ldy/Workspace/sdxl-turbo/f4b0486b498f84668e828044de1d0c8ba486e05b"
-        path = "./sdxl-turbo"
-        # pipe = DiffusionPipeline.from_pretrained("stabilityai/sdxl-turbo", torch_dtype=torch.float16, variant="fp16")
-        pipe = DiffusionPipeline.from_pretrained(path, torch_dtype=torch.float16, variant="fp16")
-        pipe.to(device)
-        pipe.generate_ip_adapter_embeds = generate_ip_adapter_embeds.__get__(pipe)
-        # load ip adapter
-        pipe.load_ip_adapter(
-            "./IP_Adapter", #"h94/IP-Adapter", 
-            subfolder="sdxl_models", 
-            weight_name="ip-adapter_sdxl_vit-h.safetensors", 
-            torch_dtype=torch.float16)
-        # set ip_adapter scale (defauld is 1)
-        pipe.set_ip_adapter_scale(1)
-        self.pipe = pipe
+        if model == 'sdxl-turbo':
+            # Use SDXL-Turbo
+            path = "./sdxl-turbo"
+            pipe = DiffusionPipeline.from_pretrained(path, torch_dtype=torch.float16, variant="fp16")
+            pipe.to(device)
+            pipe.generate_ip_adapter_embeds = generate_ip_adapter_embeds.__get__(pipe)
+            
+        elif model == 'sdxl-lightning':
+            # Use SDXL-Lightning
+            from diffusers import StableDiffusionXLPipeline, UNet2DConditionModel, EulerDiscreteScheduler
+            from safetensors.torch import load_file
+            
+            base = "stabilityai/stable-diffusion-xl-base-1.0"
+            ckpt = "./sdxl_lightning/sdxl_lightning_4step_unet.safetensors"  # Use local file
+            
+            # Load model
+            unet = UNet2DConditionModel.from_config(base, subfolder="unet").to(device, torch.float16)
+            unet.load_state_dict(load_file(ckpt, device=device))
+            pipe = StableDiffusionXLPipeline.from_pretrained(base, unet=unet, torch_dtype=torch.float16, variant="fp16").to(device)
+            
+            # Ensure sampler uses "trailing" timesteps
+            pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
+            
+            # Add the custom generate_ip_adapter_embeds method
+            pipe.generate_ip_adapter_embeds = generate_ip_adapter_embeds.__get__(pipe)
+            
+        elif model == 'sdxs-512-dreamshaper':
+            # Use SDXS-512-DreamShaper
+            from diffusers import StableDiffusionPipeline
+            
+            repo = "IDKiro/sdxs-512-dreamshaper"
+            pipe = StableDiffusionPipeline.from_pretrained(repo, torch_dtype=torch.float16)
+            pipe.to(device)
+            
+            # Load IP-Adapter for SDXS (same as other models)
+            pipe.load_ip_adapter(
+                "./IP_Adapter", 
+                subfolder="sdxl_models", 
+                weight_name="ip-adapter_sdxl_vit-h.safetensors", 
+                torch_dtype=torch.float16)
+            pipe.set_ip_adapter_scale(1)
+            
+            self.pipe = pipe
+        else:
+            raise ValueError(f"Unsupported model: {model}. Supported models are 'sdxl-turbo', 'sdxl-lightning', and 'sdxs-512-dreamshaper'")
+        
+        # load ip adapter (for all models that support it)
+        if model in ['sdxl-turbo', 'sdxl-lightning']:
+            pipe.load_ip_adapter(
+                "./IP_Adapter", #"h94/IP-Adapter", 
+                subfolder="sdxl_models", 
+                weight_name="ip-adapter_sdxl_vit-h.safetensors", 
+                torch_dtype=torch.float16)
+            # set ip_adapter scale (defauld is 1)
+            pipe.set_ip_adapter_scale(1)
+            self.pipe = pipe
+        elif model == 'sdxs-512-dreamshaper':
+            # IP-Adapter loading is already handled in the SDXS section above
+            pass
+        else:
+            # For other models, we'll handle IP-Adapter differently
+            self.pipe = None
 
     def generate(self, image_embeds, text_prompt='', generator=None):
         image_embeds = image_embeds.to(device=self.device, dtype=self.dtype)
-        pipe = self.pipe
 
-        # generate image with image prompt - ip_adapter_embeds
-        image = pipe.generate_ip_adapter_embeds(
-            prompt=text_prompt, 
-            ip_adapter_embeds=image_embeds, 
-            num_inference_steps=self.num_inference_steps,
-            guidance_scale=0.0,
-            generator=generator,
-        ).images[0]
+        # Set appropriate parameters based on model
+        if self.model == 'sdxl-lightning':
+            # SDXL-Lightning requires specific settings
+            guidance_scale = 0.0  # No classifier-free guidance
+            num_steps = 4  # Use 4 steps for SDXL-Lightning
+            pipe = self.pipe
+            
+            # generate image with image prompt - ip_adapter_embeds
+            image = pipe.generate_ip_adapter_embeds(
+                prompt=text_prompt, 
+                ip_adapter_embeds=image_embeds, 
+                num_inference_steps=num_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+            ).images[0]
+            
+        elif self.model == 'sdxs-512-dreamshaper':
+            # SDXS-512-DreamShaper requires specific settings
+            guidance_scale = 0.0  # No classifier-free guidance (as per SDXS requirements)
+            num_steps = 1  # One-step generation (as per SDXS requirements)
+            pipe = self.pipe
+            
+            # Use IP-Adapter with SDXS (same approach as other models)
+            image = pipe.generate_ip_adapter_embeds(
+                prompt=text_prompt, 
+                ip_adapter_embeds=image_embeds, 
+                num_inference_steps=num_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+            ).images[0]
+            
+        else:
+            # SDXL-Turbo settings
+            guidance_scale = 0.0
+            num_steps = self.num_inference_steps
+            pipe = self.pipe
+            
+            # generate image with image prompt - ip_adapter_embeds
+            image = pipe.generate_ip_adapter_embeds(
+                prompt=text_prompt, 
+                ip_adapter_embeds=image_embeds, 
+                num_inference_steps=num_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+            ).images[0]
 
         return image
         
@@ -577,7 +660,7 @@ if __name__ == "__main__":
     # display(image)
 
     from IPython.display import Image, display
-    generator = Generator4Embeds(num_inference_steps=4)
+    generator = Generator4Embeds(num_inference_steps=4, model='sdxl-turbo')  # Can be changed to 'sdxs-512-dreamshaper' for testing
 
     # 2. Load image encoder
     # from transformers import CLIPVisionModelWithProjection, CLIPImageProcessor
