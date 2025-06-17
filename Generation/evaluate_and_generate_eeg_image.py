@@ -48,7 +48,7 @@ def compute_eeg_embeddings(eeg_model, dataloader, device):
             classes.extend(c)
     return torch.cat(embeddings, dim=0).to(dtype=torch.float32), labels, classes
 
-def evaluate_model(eeg_model, eeg_embeddings, labels, classes, precomputed_embeddings, unique_labels, device, k, use_prior=False, pipe=None):
+def evaluate_model(eeg_model, eeg_embeddings, labels, classes, precomputed_embeddings, unique_labels, device, k, use_prior=False, pipe=None, guidance_scale=5.0):
     """
     Evaluate model performance for image retrieval and classification.
     
@@ -63,6 +63,7 @@ def evaluate_model(eeg_model, eeg_embeddings, labels, classes, precomputed_embed
         k: Number of classes to consider for evaluation
         use_prior: Whether to use diffusion prior
         pipe: Diffusion prior pipeline (required if use_prior=True)
+        guidance_scale: Guidance scale for diffusion prior generation
     
     Returns:
         accuracy, top5_accuracy, class_accuracy, predictions_dict
@@ -106,7 +107,7 @@ def evaluate_model(eeg_model, eeg_embeddings, labels, classes, precomputed_embed
             
             # Generate embedding using diffusion prior if specified
             if use_prior and pipe is not None:
-                h = pipe.generate(c_embeds=eeg_embed.unsqueeze(0), num_inference_steps=50, guidance_scale=5.0).squeeze(0)
+                h = pipe.generate(c_embeds=eeg_embed.unsqueeze(0), num_inference_steps=50, guidance_scale=guidance_scale).squeeze(0)
                 query_embed = h.to(dtype=torch.float32)
             else:
                 query_embed = eeg_embed.to(dtype=torch.float32)
@@ -201,6 +202,7 @@ def main():
     parser.add_argument("--generate_without_prior", action="store_true", help="Generate images without diffusion prior")
     parser.add_argument("--generation_repeats", type=int, default=3, help="How many times to generate images for each embedding")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use")
+    parser.add_argument("--guidance_scale", type=float, default=5.0, help="Guidance scale for diffusion prior generation")
     args = parser.parse_args()
 
     experiment_folder = f"./experiments/experiment_{args.experiment_id}"
@@ -333,7 +335,7 @@ def main():
                 h = eeg_embeds.to(dtype=torch.float16)
             else:
                 # Use diffusion prior to generate intermediate embeddings
-                h = pipe.generate(c_embeds=eeg_embeds, num_inference_steps=50, guidance_scale=5.0)
+                h = pipe.generate(c_embeds=eeg_embeds, num_inference_steps=50, guidance_scale=args.guidance_scale)
             
             for j in range(gen_repeats):
                 image = generator.generate(h.to(dtype=torch.float16))
@@ -380,7 +382,7 @@ def main():
             acc, top5_acc, class_acc, predictions_dict = evaluate_model(
                 eeg_model, emb_eeg_test, labels_test, classes_test, 
                 precomputed_embeddings, valid_labels, device, k, 
-                use_prior=False, pipe=None
+                use_prior=False, pipe=None, guidance_scale=args.guidance_scale
             )
             
             results[f'k={k}_retrieval_acc'] = acc
@@ -404,7 +406,7 @@ def main():
                 acc, top5_acc, class_acc, predictions_dict = evaluate_model(
                     eeg_model, emb_eeg_test, labels_test, classes_test, 
                     precomputed_embeddings, valid_labels, device, k, 
-                    use_prior=True, pipe=pipe
+                    use_prior=True, pipe=pipe, guidance_scale=args.guidance_scale
                 )
                 
                 results[f'k={k}_retrieval_acc_with_prior'] = acc
