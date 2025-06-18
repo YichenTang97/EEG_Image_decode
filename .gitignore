@@ -34,3 +34,6 @@ Retrieval/wandb
 images_set/
 Preprocessed_data_250Hz/
 Generation/experiment*
+Generation/stable-diffusion-xl-base-1.0
+Generation/sdxl_lightning
+Generation/sdxs-512-dreamshaper
