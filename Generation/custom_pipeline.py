@@ -480,12 +480,24 @@ class Generator4Embeds:
             from diffusers import StableDiffusionXLPipeline, UNet2DConditionModel, EulerDiscreteScheduler
             from safetensors.torch import load_file
             
-            base = "stabilityai/stable-diffusion-xl-base-1.0"
+            base = "./stable-diffusion-xl-base-1.0"
             ckpt = "./sdxl_lightning/sdxl_lightning_4step_unet.safetensors"  # Use local file
             
             # Load model
             unet = UNet2DConditionModel.from_config(base, subfolder="unet").to(device, torch.float16)
-            unet.load_state_dict(load_file(ckpt, device=device))
+            
+            # Load checkpoint to CPU first, then move to device (fixes safetensors device issue)
+            try:
+                # Try loading directly to device first
+                unet.load_state_dict(load_file(ckpt, device=device))
+            except Exception as e:
+                print(f"Warning: Direct device loading failed: {e}")
+                print("Loading checkpoint to CPU first, then moving to device...")
+                # Load to CPU first, then move to device
+                checkpoint = load_file(ckpt, device="cpu")
+                unet.load_state_dict(checkpoint)
+                unet = unet.to(device, torch.float16)
+            
             pipe = StableDiffusionXLPipeline.from_pretrained(base, unet=unet, torch_dtype=torch.float16, variant="fp16").to(device)
             
             # Ensure sampler uses "trailing" timesteps
@@ -498,8 +510,9 @@ class Generator4Embeds:
             # Use SDXS-512-DreamShaper
             from diffusers import StableDiffusionPipeline
             
-            repo = "IDKiro/sdxs-512-dreamshaper"
-            pipe = StableDiffusionPipeline.from_pretrained(repo, torch_dtype=torch.float16)
+            # repo = "IDKiro/sdxs-512-dreamshaper"
+            path = "./sdxs-512-dreamshaper"
+            pipe = StableDiffusionPipeline.from_pretrained(path, torch_dtype=torch.float16)
             pipe.to(device)
             
             # Load IP-Adapter for SDXS (same as other models)
