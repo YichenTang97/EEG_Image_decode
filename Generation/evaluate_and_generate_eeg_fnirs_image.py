@@ -16,9 +16,10 @@ import csv
 import datetime
 import time
 import torch.nn as nn
+import json
 
 # Import ATMS model components from training script
-from train_ATMS_EEG_fNIRS_image import ATMS_Multimodal, EEGfNIRSImageDataset, precompute_image_embeddings
+from train_ATMS_EEG_fNIRS_image import ATMS_Multimodal, EEGfNIRSImageDataset, precompute_image_embeddings, Config
 
 def save_image_with_compression(image, file_path, use_compression=False, jpeg_quality=85):
     """
@@ -78,6 +79,8 @@ Generation repeats: {args.generation_repeats}
 Image compression: {'JPEG (quality: ' + str(args.jpeg_quality) + ')' if args.compression else 'PNG (no compression)'}
 No EEG: {args.no_eeg}
 No fNIRS: {args.no_fnirs}
+EEG data file: {args.eeg_data_file if not args.no_eeg else 'None'}
+fNIRS data file: {args.fnirs_data_file if not args.no_fnirs else 'None'}
 
 TASK-SPECIFIC PARAMETERS
 {'-'*20}"""
@@ -112,6 +115,8 @@ ADDITIONAL INFORMATION
 EXPERIMENT DETAILS
 {'-'*20}
 Experiment ID: {args.experiment_id}
+EEG data path: {os.path.join(experiment_folder, args.eeg_data_file) if not args.no_eeg else 'None'}
+fNIRS data path: {os.path.join(experiment_folder, args.fnirs_data_file) if not args.no_fnirs else 'None'}
 Output folder: {output_folder}
 
 {'='*60}
@@ -326,6 +331,8 @@ def main():
     parser = argparse.ArgumentParser(description="EEG-fNIRS Image Generation and Retrieval Evaluation with ATMS_Multimodal")
     parser.add_argument("--task", type=str, default="evaluate", choices=["generate", "evaluate", "regenerate_stimuli"], help="Task to perform")
     parser.add_argument("--experiment_id", type=str, default="gtec_250527_data_250527_eeg_fnirs", help="Experiment ID")
+    parser.add_argument("--eeg_data_file", type=str, default="whitened_eeg_data.npy", help="EEG data file name")
+    parser.add_argument("--fnirs_data_file", type=str, default="whitened_fnirs_data.npy", help="fNIRS data file name")
     parser.add_argument("--model_path", type=str, help="Path to trained ATMS_Multimodal model (if not provided, will use final_model.pth from latest training)")
     parser.add_argument("--evaluation_with_prior", action="store_true", help="Use diffusion prior for evaluation")
     parser.add_argument("--generate_without_prior", action="store_true", help="Generate images without diffusion prior")
@@ -342,8 +349,8 @@ def main():
     args = parser.parse_args()
 
     experiment_folder = f"./experiments/experiment_{args.experiment_id}"
-    eeg_data_path = os.path.join(experiment_folder, 'whitened_eeg_data.npy') if not args.no_eeg else None
-    fnirs_data_path = os.path.join(experiment_folder, 'whitened_fnirs_data.npy') if not args.no_fnirs else None
+    eeg_data_path = os.path.join(experiment_folder, args.eeg_data_file) if not args.no_eeg else None
+    fnirs_data_path = os.path.join(experiment_folder, args.fnirs_data_file) if not args.no_fnirs else None
     stimuli_folder = os.path.join(experiment_folder, 'image_pool')
     diffusion_prior_folder = os.path.join(experiment_folder, 'diffusion_prior')
     
@@ -394,14 +401,6 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=0)
 
     print('Loading trained ATMS_Multimodal model...')
-    model = ATMS_Multimodal(
-        eeg_channels=train_dataset.eeg_X.shape[1] if not args.no_eeg else 1,
-        fnirs_channels=train_dataset.fnirs_X.shape[1] if not args.no_fnirs else 1,
-        eeg_seq_len=train_dataset.eeg_X.shape[2] if not args.no_eeg else 1,
-        fnirs_seq_len=train_dataset.fnirs_X.shape[2] if not args.no_fnirs else 1,
-        no_fnirs=args.no_fnirs,
-        no_eeg=args.no_eeg
-    )
     
     # Load model weights
     if args.model_path:
@@ -423,6 +422,33 @@ def main():
         raise FileNotFoundError(f"Model not found at {model_path}")
     
     print(f"Loading model from: {model_path}")
+    
+    # Load model configuration from model directory
+    model_config = load_model_configuration(model_path)
+    
+    # Create iTransformer configurations from model config or use defaults
+    eeg_seq_len = train_dataset.eeg_X.shape[2] if not args.no_eeg else 1
+    fnirs_seq_len = train_dataset.fnirs_X.shape[2] if not args.no_fnirs else 1
+    
+    if model_config is not None:
+        print("Successfully loaded model configuration from model directory")
+        eeg_config, fnirs_config = create_itransformer_configs_from_model_config(model_config, eeg_seq_len, fnirs_seq_len)
+    else:
+        print("No model configuration found, using default iTransformer configurations")
+        eeg_config = None
+        fnirs_config = None
+    
+    model = ATMS_Multimodal(
+        eeg_channels=train_dataset.eeg_X.shape[1] if not args.no_eeg else 1,
+        fnirs_channels=train_dataset.fnirs_X.shape[1] if not args.no_fnirs else 1,
+        eeg_seq_len=train_dataset.eeg_X.shape[2] if not args.no_eeg else 1,
+        fnirs_seq_len=train_dataset.fnirs_X.shape[2] if not args.no_fnirs else 1,
+        no_fnirs=args.no_fnirs,
+        no_eeg=args.no_eeg,
+        eeg_config=eeg_config,
+        fnirs_config=fnirs_config
+    )
+    
     model.load_state_dict(torch.load(model_path, map_location=device))
     model = model.to(device)
 
@@ -802,6 +828,83 @@ def load_and_analyze_predictions(predictions_path):
         analysis['summary']['class_accuracy_with_prior'] = correct_classes / len(data['true_classes'])
     
     return analysis
+
+def load_model_configuration(model_path):
+    """
+    Load model configuration from the model directory.
+    
+    Args:
+        model_path: Path to the model file
+    
+    Returns:
+        Dictionary containing model configuration or None if not found
+    """
+    # Get the directory containing the model file
+    model_dir = os.path.dirname(model_path)
+    config_path = os.path.join(model_dir, "model_configuration.json")
+    
+    if not os.path.exists(config_path):
+        print(f"Model configuration not found at: {config_path}")
+        return None
+    
+    print(f"Loading model configuration from: {config_path}")
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    
+    return config
+
+def create_itransformer_configs_from_model_config(model_config, eeg_seq_len, fnirs_seq_len):
+    """
+    Create iTransformer Config objects from model configuration.
+    
+    Args:
+        model_config: Dictionary containing model configuration
+        eeg_seq_len: EEG sequence length
+        fnirs_seq_len: fNIRS sequence length
+    
+    Returns:
+        Tuple of (eeg_config, fnirs_config) or (None, None) if not available
+    """
+    eeg_config = None
+    fnirs_config = None
+    
+    itransformer_configs = model_config.get('itransformer_configurations', {})
+    
+    # Create EEG config if available
+    if 'eeg' in itransformer_configs and itransformer_configs['eeg'] is not None:
+        eeg_params = itransformer_configs['eeg']
+        if all(param is not None for param in [eeg_params.get('d_model'), eeg_params.get('n_heads'), 
+                                              eeg_params.get('e_layers'), eeg_params.get('d_ff'), 
+                                              eeg_params.get('dropout')]):
+            eeg_config = Config(
+                d_model=eeg_params['d_model'],
+                n_heads=eeg_params['n_heads'],
+                e_layers=eeg_params['e_layers'],
+                d_ff=eeg_params['d_ff'],
+                dropout=eeg_params['dropout'],
+                factor=eeg_params.get('factor', 1),
+                seq_len=eeg_seq_len
+            )
+            print(f"Created EEG iTransformer config from model: d_model={eeg_config.d_model}, n_heads={eeg_config.n_heads}, e_layers={eeg_config.e_layers}, d_ff={eeg_config.d_ff}, dropout={eeg_config.dropout}")
+    
+    # Create fNIRS config if available
+    if 'fnirs' in itransformer_configs and itransformer_configs['fnirs'] is not None:
+        fnirs_params = itransformer_configs['fnirs']
+        if all(param is not None for param in [fnirs_params.get('d_model'), fnirs_params.get('n_heads'), 
+                                              fnirs_params.get('e_layers'), fnirs_params.get('d_ff'), 
+                                              fnirs_params.get('dropout')]):
+            fnirs_config = Config(
+                d_model=fnirs_params['d_model'],
+                n_heads=fnirs_params['n_heads'],
+                e_layers=fnirs_params['e_layers'],
+                d_ff=fnirs_params['d_ff'],
+                dropout=fnirs_params['dropout'],
+                factor=fnirs_params.get('factor', 1),
+                seq_len=fnirs_seq_len
+            )
+            print(f"Created fNIRS iTransformer config from model: d_model={fnirs_config.d_model}, n_heads={fnirs_config.n_heads}, e_layers={fnirs_config.e_layers}, d_ff={fnirs_config.d_ff}, dropout={fnirs_config.dropout}")
+    
+    return eeg_config, fnirs_config
 
 if __name__ == "__main__":
     main()

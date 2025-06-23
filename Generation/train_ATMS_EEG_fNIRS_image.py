@@ -28,6 +28,7 @@ import datetime
 import matplotlib.pyplot as plt
 import open_clip
 from PIL import Image
+import json
 
 class Config:
     def __init__(self, d_model=250, n_heads=4, e_layers=1, d_ff=256, dropout=0.25, factor=1, seq_len=250):
@@ -168,7 +169,7 @@ class Proj_eeg(nn.Sequential):
 #         return torch.mean(attention_output, dim=0)
 
 class ATMS_Multimodal(nn.Module):
-    def __init__(self, eeg_channels=15, fnirs_channels=16, eeg_seq_len=250, fnirs_seq_len=200, num_subjects=2, num_features=64, num_latents=1024, num_blocks=1, no_fnirs=False, no_eeg=False):
+    def __init__(self, eeg_channels=15, fnirs_channels=16, eeg_seq_len=250, fnirs_seq_len=200, num_subjects=2, num_features=64, num_latents=1024, num_blocks=1, no_fnirs=False, no_eeg=False, eeg_config=None, fnirs_config=None):
         super(ATMS_Multimodal, self).__init__()
         
         self.no_fnirs = no_fnirs
@@ -184,16 +185,17 @@ class ATMS_Multimodal(nn.Module):
         
         # EEG stream (only if not no_eeg)
         if not self.no_eeg:
-            # EEG config
-            eeg_config = Config(
-                d_model=d_model_eeg,  # Model dimension equals sequence length
-                n_heads=4,    # Number of attention heads
-                e_layers=1,   # Number of encoder layers
-                d_ff=256,     # Feed-forward dimension
-                dropout=0.25, # Dropout rate
-                factor=1,     # Attention factor
-                seq_len=eeg_seq_len
-            )
+            # Use provided EEG config or create default
+            if eeg_config is None:
+                eeg_config = Config(
+                    d_model=d_model_eeg,  # Model dimension equals sequence length
+                    n_heads=4,    # Number of attention heads
+                    e_layers=1,   # Number of encoder layers
+                    d_ff=256,     # Feed-forward dimension
+                    dropout=0.25, # Dropout rate
+                    factor=1,     # Attention factor
+                    seq_len=eeg_seq_len
+                )
             eeg_config.enc_in = eeg_channels
             
             self.eeg_encoder = iTransformer(eeg_config, num_channels=eeg_channels)
@@ -206,16 +208,17 @@ class ATMS_Multimodal(nn.Module):
             fnirs_temp_len = math.ceil((fnirs_temp_len - 50) / 5)
             fnirs_embedding_dim = fnirs_temp_len * 40  # 40 is the emb_size
             
-            # fNIRS config
-            fnirs_config = Config(
-                d_model=d_model_fnirs,  # Model dimension equals sequence length
-                n_heads=2,    # Number of attention heads
-                e_layers=1,   # Number of encoder layers
-                d_ff=256,     # Feed-forward dimension
-                dropout=0.5, # Dropout rate
-                factor=1,     # Attention factor
-                seq_len=fnirs_seq_len
-            )
+            # Use provided fNIRS config or create default
+            if fnirs_config is None:
+                fnirs_config = Config(
+                    d_model=d_model_fnirs,  # Model dimension equals sequence length
+                    n_heads=2,    # Number of attention heads
+                    e_layers=1,   # Number of encoder layers
+                    d_ff=256,     # Feed-forward dimension
+                    dropout=0.5, # Dropout rate
+                    factor=1,     # Attention factor
+                    seq_len=fnirs_seq_len
+                )
             fnirs_config.enc_in = fnirs_channels
             
             self.fnirs_encoder = iTransformer(fnirs_config, num_channels=fnirs_channels)
@@ -542,9 +545,412 @@ def evaluate_model(model, dataloader, device, precomputed_embeddings, valid_labe
     
     return results
 
+def save_training_configuration(results_dir, args, model, train_dataset, test_dataset, best_epoch_info, model_dir):
+    """
+    Save comprehensive training configuration and parameter information.
+    
+    Args:
+        results_dir: Directory to save results
+        args: Command line arguments
+        model: The trained model
+        train_dataset: Training dataset
+        test_dataset: Test dataset
+        best_epoch_info: Information about the best model
+        model_dir: Directory where models are saved
+    """
+    config_file = os.path.join(results_dir, "training_configuration.txt")
+    
+    # Determine model type
+    if args.no_eeg and args.no_fnirs:
+        model_type = "Invalid (both no_eeg and no_fnirs)"
+    elif args.no_eeg:
+        model_type = "fNIRS-only"
+    elif args.no_fnirs:
+        model_type = "EEG-only"
+    else:
+        model_type = "EEG-fNIRS multimodal"
+    
+    # Get data shapes
+    eeg_shape = train_dataset.eeg_X.shape if train_dataset.eeg_X is not None else "None"
+    fnirs_shape = train_dataset.fnirs_X.shape if train_dataset.fnirs_X is not None else "None"
+    
+    # Get model parameter count
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    config_content = f"""TRAINING CONFIGURATION
+{'='*60}
+
+EXPERIMENT INFORMATION
+{'-'*30}
+Experiment ID: {args.experiment_id}
+Training completed: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Model type: {model_type}
+Results directory: {results_dir}
+Model directory: {model_dir}
+
+DATA PATHS AND SHAPES
+{'-'*30}
+EEG data path: {os.path.join(f"./experiments/experiment_{args.experiment_id}", args.eeg_data_file) if not args.no_eeg else 'None'}
+fNIRS data path: {os.path.join(f"./experiments/experiment_{args.experiment_id}", args.fnirs_data_file) if not args.no_fnirs else 'None'}
+Stimuli folder: {os.path.join(f"./experiments/experiment_{args.experiment_id}", 'image_pool')}
+
+Training data shapes:
+- EEG: {eeg_shape}
+- fNIRS: {fnirs_shape}
+- Labels: {len(train_dataset.y) if train_dataset.y is not None else 'None'}
+
+Test data shapes:
+- EEG: {test_dataset.eeg_X.shape if test_dataset.eeg_X is not None else 'None'}
+- fNIRS: {test_dataset.fnirs_X.shape if test_dataset.fnirs_X is not None else 'None'}
+- Labels: {len(test_dataset.y) if test_dataset.y is not None else 'None'}
+
+MODEL HYPERPARAMETERS
+{'-'*30}
+EEG channels: {train_dataset.eeg_X.shape[1] if train_dataset.eeg_X is not None else 'None'}
+fNIRS channels: {train_dataset.fnirs_X.shape[1] if train_dataset.fnirs_X is not None else 'None'}
+EEG sequence length: {train_dataset.eeg_X.shape[2] if train_dataset.eeg_X is not None else 'None'}
+fNIRS sequence length: {train_dataset.fnirs_X.shape[2] if train_dataset.fnirs_X is not None else 'None'}
+
+Model architecture parameters:
+- Total parameters: {total_params:,}
+- Trainable parameters: {trainable_params:,}
+- No EEG: {args.no_eeg}
+- No fNIRS: {args.no_fnirs}
+
+ITRANSFORMER CONFIGURATIONS
+{'-'*30}
+Note: iTransformer configurations used in the model"""
+    
+    if not args.no_eeg:
+        config_content += f"""
+EEG iTransformer (used in model):
+- d_model: {args.eeg_d_model}
+- n_heads: {args.eeg_n_heads}
+- e_layers: {args.eeg_e_layers}
+- d_ff: {args.eeg_d_ff}
+- dropout: {args.eeg_dropout}
+- factor: 1
+- seq_len: {train_dataset.eeg_X.shape[2] if train_dataset.eeg_X is not None else 'None'}
+- enc_in: {train_dataset.eeg_X.shape[1] if train_dataset.eeg_X is not None else 'None'}"""
+    
+    if not args.no_fnirs:
+        config_content += f"""
+fNIRS iTransformer (used in model):
+- d_model: {args.fnirs_d_model}
+- n_heads: {args.fnirs_n_heads}
+- e_layers: {args.fnirs_e_layers}
+- d_ff: {args.fnirs_d_ff}
+- dropout: {args.fnirs_dropout}
+- factor: 1
+- seq_len: {train_dataset.fnirs_X.shape[2] if train_dataset.fnirs_X is not None else 'None'}
+- enc_in: {train_dataset.fnirs_X.shape[1] if train_dataset.fnirs_X is not None else 'None'}"""
+    
+    config_content += f"""
+
+TRAINING PARAMETERS
+{'-'*30}
+Learning rate: {args.lr}
+Number of epochs: {args.epochs}
+Batch size: {args.batch_size}
+Device: {args.device}
+Save every N epochs: {args.save_every}
+
+OPTIMIZER CONFIGURATION
+{'-'*30}
+Optimizer: AdamW
+Learning rate: {args.lr}
+Weight decay: 0.01 (default)
+
+LOSS FUNCTION CONFIGURATION
+{'-'*30}
+Primary loss: CLIP loss + MSE regression loss
+Alpha (MSE weight): 0.90
+MSE loss weight: 10.0
+CLIP loss weight: 1.0
+
+BEST MODEL PERFORMANCE
+{'-'*30}"""
+    
+    for key, value in best_epoch_info.items():
+        if isinstance(value, float):
+            config_content += f"{key}: {value:.4f}\n"
+        else:
+            config_content += f"{key}: {value}\n"
+    
+    config_content += f"""
+
+MODEL COMPONENTS
+{'-'*30}"""
+    
+    if not args.no_eeg:
+        config_content += f"""
+EEG Stream:
+- iTransformer encoder: {model.eeg_encoder.__class__.__name__}
+- Patch embedding: {model.enc_eeg.__class__.__name__}
+- Projection layer: {model.proj_eeg.__class__.__name__}
+- EEG embedding dimension: {model.proj_eeg[-1].normalized_shape[0] if hasattr(model.proj_eeg[-1], 'normalized_shape') else 'Unknown'}"""
+    
+    if not args.no_fnirs:
+        config_content += f"""
+fNIRS Stream:
+- iTransformer encoder: {model.fnirs_encoder.__class__.__name__}
+- Patch embedding: {model.enc_fnirs.__class__.__name__}
+- Projection layer: {model.proj_fnirs.__class__.__name__}
+- fNIRS embedding dimension: {model.proj_fnirs[-1].normalized_shape[0] if hasattr(model.proj_fnirs[-1], 'normalized_shape') else 'Unknown'}"""
+    
+    if not args.no_eeg and not args.no_fnirs:
+        config_content += f"""
+Fusion:
+- Method: Simple averaging with layer normalization
+- Fusion normalization: {model.fusion_norm.__class__.__name__}"""
+    
+    config_content += f"""
+
+EVALUATION METRICS
+{'-'*30}
+K-values evaluated: [2, 4, 10, 50, 100]
+Top-5 accuracy: Included for k >= 5
+Evaluation method: Random k-class selection excluding true class
+
+SAVED FILES
+{'-'*30}
+- Training results CSV: {os.path.join(results_dir, "training_results.csv")}
+- Best model info: {os.path.join(results_dir, "best_model_info.txt")}
+- Training plots: {os.path.join(results_dir, "training_plots.png")}
+- Best model weights: {os.path.join(model_dir, "best_model.pth")}
+- Final model weights: {os.path.join(model_dir, "final_model.pth")}
+- Epoch checkpoints: {os.path.join(model_dir, "epoch_*.pth")}
+
+{'='*60}
+Generated by: train_ATMS_EEG_fNIRS_image.py
+Timestamp: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+    
+    with open(config_file, 'w') as f:
+        f.write(config_content)
+    
+    print(f"Training configuration saved to: {config_file}")
+    return config_file
+
+def save_training_configuration_json(results_dir, args, model, train_dataset, test_dataset, best_epoch_info, model_dir):
+    """
+    Save training configuration as JSON for programmatic access.
+    
+    Args:
+        results_dir: Directory to save results
+        args: Command line arguments
+        model: The trained model
+        train_dataset: Training dataset
+        test_dataset: Test dataset
+        best_epoch_info: Information about the best model
+        model_dir: Directory where models are saved
+    """
+    config_json = {
+        "experiment_info": {
+            "experiment_id": args.experiment_id,
+            "training_completed": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "model_type": "fNIRS-only" if args.no_eeg else "EEG-only" if args.no_fnirs else "EEG-fNIRS multimodal",
+            "results_directory": results_dir,
+            "model_directory": model_dir
+        },
+        "data_paths": {
+            "eeg_data_path": os.path.join(f"./experiments/experiment_{args.experiment_id}", args.eeg_data_file) if not args.no_eeg else None,
+            "fnirs_data_path": os.path.join(f"./experiments/experiment_{args.experiment_id}", args.fnirs_data_file) if not args.no_fnirs else None,
+            "stimuli_folder": os.path.join(f"./experiments/experiment_{args.experiment_id}", 'image_pool'),
+            "eeg_data_file": args.eeg_data_file if not args.no_eeg else None,
+            "fnirs_data_file": args.fnirs_data_file if not args.no_fnirs else None
+        },
+        "data_shapes": {
+            "training": {
+                "eeg_shape": list(train_dataset.eeg_X.shape) if train_dataset.eeg_X is not None else None,
+                "fnirs_shape": list(train_dataset.fnirs_X.shape) if train_dataset.fnirs_X is not None else None,
+                "num_labels": len(train_dataset.y) if train_dataset.y is not None else None
+            },
+            "test": {
+                "eeg_shape": list(test_dataset.eeg_X.shape) if test_dataset.eeg_X is not None else None,
+                "fnirs_shape": list(test_dataset.fnirs_X.shape) if test_dataset.fnirs_X is not None else None,
+                "num_labels": len(test_dataset.y) if test_dataset.y is not None else None
+            }
+        },
+        "model_hyperparameters": {
+            "eeg_channels": train_dataset.eeg_X.shape[1] if train_dataset.eeg_X is not None else None,
+            "fnirs_channels": train_dataset.fnirs_X.shape[1] if train_dataset.fnirs_X is not None else None,
+            "eeg_seq_len": train_dataset.eeg_X.shape[2] if train_dataset.eeg_X is not None else None,
+            "fnirs_seq_len": train_dataset.fnirs_X.shape[2] if train_dataset.fnirs_X is not None else None,
+            "total_parameters": sum(p.numel() for p in model.parameters()),
+            "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
+            "no_eeg": args.no_eeg,
+            "no_fnirs": args.no_fnirs
+        },
+        "itransformer_configurations": {
+            "note": "iTransformer configurations used in the model",
+            "eeg": {
+                "d_model": args.eeg_d_model,
+                "n_heads": args.eeg_n_heads,
+                "e_layers": args.eeg_e_layers,
+                "d_ff": args.eeg_d_ff,
+                "dropout": args.eeg_dropout,
+                "factor": 1,
+                "seq_len": train_dataset.eeg_X.shape[2] if train_dataset.eeg_X is not None else None,
+                "enc_in": train_dataset.eeg_X.shape[1] if train_dataset.eeg_X is not None else None,
+                "defaults": {
+                    "d_model": 250,
+                    "n_heads": 4,
+                    "e_layers": 1,
+                    "d_ff": 256,
+                    "dropout": 0.25
+                }
+            } if not args.no_eeg else None,
+            "fnirs": {
+                "d_model": args.fnirs_d_model,
+                "n_heads": args.fnirs_n_heads,
+                "e_layers": args.fnirs_e_layers,
+                "d_ff": args.fnirs_d_ff,
+                "dropout": args.fnirs_dropout,
+                "factor": 1,
+                "seq_len": train_dataset.fnirs_X.shape[2] if train_dataset.fnirs_X is not None else None,
+                "enc_in": train_dataset.fnirs_X.shape[1] if train_dataset.fnirs_X is not None else None,
+                "defaults": {
+                    "d_model": 200,
+                    "n_heads": 2,
+                    "e_layers": 1,
+                    "d_ff": 256,
+                    "dropout": 0.5
+                }
+            } if not args.no_fnirs else None
+        },
+        "training_parameters": {
+            "learning_rate": args.lr,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "device": args.device,
+            "save_every": args.save_every
+        },
+        "optimizer_config": {
+            "optimizer": "AdamW",
+            "learning_rate": args.lr,
+            "weight_decay": 0.01
+        },
+        "loss_config": {
+            "primary_loss": "CLIP loss + MSE regression loss",
+            "alpha_mse_weight": 0.90,
+            "mse_loss_weight": 10.0,
+            "clip_loss_weight": 1.0
+        },
+        "best_model_performance": best_epoch_info,
+        "evaluation_metrics": {
+            "k_values": [2, 4, 10, 50, 100],
+            "top5_accuracy": "Included for k >= 5",
+            "evaluation_method": "Random k-class selection excluding true class"
+        },
+        "saved_files": {
+            "training_results_csv": os.path.join(results_dir, "training_results.csv"),
+            "best_model_info": os.path.join(results_dir, "best_model_info.txt"),
+            "training_plots": os.path.join(results_dir, "training_plots.png"),
+            "best_model_weights": os.path.join(model_dir, "best_model.pth"),
+            "final_model_weights": os.path.join(model_dir, "final_model.pth"),
+            "epoch_checkpoints": os.path.join(model_dir, "epoch_*.pth")
+        }
+    }
+    
+    json_file = os.path.join(results_dir, "training_configuration.json")
+    with open(json_file, 'w') as f:
+        json.dump(config_json, f, indent=2)
+    
+    print(f"Training configuration JSON saved to: {json_file}")
+    return json_file
+
+def save_model_configuration(model_dir, args, model, train_dataset, test_dataset, eeg_config, fnirs_config):
+    """
+    Save training configuration in the model folder for easy access during evaluation.
+    
+    Args:
+        model_dir: Directory where models are saved
+        args: Command line arguments
+        model: The trained model
+        train_dataset: Training dataset
+        test_dataset: Test dataset
+        eeg_config: EEG iTransformer configuration
+        fnirs_config: fNIRS iTransformer configuration
+    """
+    config_json = {
+        "experiment_info": {
+            "experiment_id": args.experiment_id,
+            "training_completed": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "model_type": "fNIRS-only" if args.no_eeg else "EEG-only" if args.no_fnirs else "EEG-fNIRS multimodal",
+            "model_directory": model_dir
+        },
+        "data_paths": {
+            "eeg_data_file": args.eeg_data_file if not args.no_eeg else None,
+            "fnirs_data_file": args.fnirs_data_file if not args.no_fnirs else None
+        },
+        "data_shapes": {
+            "training": {
+                "eeg_shape": list(train_dataset.eeg_X.shape) if train_dataset.eeg_X is not None else None,
+                "fnirs_shape": list(train_dataset.fnirs_X.shape) if train_dataset.fnirs_X is not None else None,
+                "num_labels": len(train_dataset.y) if train_dataset.y is not None else None
+            },
+            "test": {
+                "eeg_shape": list(test_dataset.eeg_X.shape) if test_dataset.eeg_X is not None else None,
+                "fnirs_shape": list(test_dataset.fnirs_X.shape) if test_dataset.fnirs_X is not None else None,
+                "num_labels": len(test_dataset.y) if test_dataset.y is not None else None
+            }
+        },
+        "model_hyperparameters": {
+            "eeg_channels": train_dataset.eeg_X.shape[1] if train_dataset.eeg_X is not None else None,
+            "fnirs_channels": train_dataset.fnirs_X.shape[1] if train_dataset.fnirs_X is not None else None,
+            "eeg_seq_len": train_dataset.eeg_X.shape[2] if train_dataset.eeg_X is not None else None,
+            "fnirs_seq_len": train_dataset.fnirs_X.shape[2] if train_dataset.fnirs_X is not None else None,
+            "total_parameters": sum(p.numel() for p in model.parameters()),
+            "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
+            "no_eeg": args.no_eeg,
+            "no_fnirs": args.no_fnirs
+        },
+        "itransformer_configurations": {
+            "note": "iTransformer configurations used in the model",
+            "eeg": {
+                "d_model": eeg_config.d_model if eeg_config else None,
+                "n_heads": eeg_config.n_heads if eeg_config else None,
+                "e_layers": eeg_config.e_layers if eeg_config else None,
+                "d_ff": eeg_config.d_ff if eeg_config else None,
+                "dropout": eeg_config.dropout if eeg_config else None,
+                "factor": eeg_config.factor if eeg_config else None,
+                "seq_len": eeg_config.seq_len if eeg_config else None,
+                "enc_in": eeg_config.enc_in if eeg_config else None
+            } if eeg_config else None,
+            "fnirs": {
+                "d_model": fnirs_config.d_model if fnirs_config else None,
+                "n_heads": fnirs_config.n_heads if fnirs_config else None,
+                "e_layers": fnirs_config.e_layers if fnirs_config else None,
+                "d_ff": fnirs_config.d_ff if fnirs_config else None,
+                "dropout": fnirs_config.dropout if fnirs_config else None,
+                "factor": fnirs_config.factor if fnirs_config else None,
+                "seq_len": fnirs_config.seq_len if fnirs_config else None,
+                "enc_in": fnirs_config.enc_in if fnirs_config else None
+            } if fnirs_config else None
+        },
+        "training_parameters": {
+            "learning_rate": args.lr,
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "device": args.device,
+            "save_every": args.save_every
+        }
+    }
+    
+    json_file = os.path.join(model_dir, "model_configuration.json")
+    with open(json_file, 'w') as f:
+        json.dump(config_json, f, indent=2)
+    
+    print(f"Model configuration saved to: {json_file}")
+    return json_file
+
 def main():
     parser = argparse.ArgumentParser(description='ATMS Training for EEG-fNIRS-Image Dataset')
     parser.add_argument('--experiment_id', type=str, default='gtec_250527_data_250527_eeg_fnirs', help='Experiment ID')
+    parser.add_argument('--eeg_data_file', type=str, default='whitened_eeg_data.npy', help='EEG data file name')
+    parser.add_argument('--fnirs_data_file', type=str, default='whitened_fnirs_data.npy', help='fNIRS data file name')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--epochs', type=int, default=40, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
@@ -552,12 +958,26 @@ def main():
     parser.add_argument('--save_every', type=int, default=5, help='Save model every N epochs')
     parser.add_argument('--no_fnirs', action='store_true', help='Use EEG-only model')
     parser.add_argument('--no_eeg', action='store_true', help='Use fNIRS-only model')
+    
+    # iTransformer configuration arguments
+    parser.add_argument('--eeg_d_model', type=int, default=250, help='EEG iTransformer d_model')
+    parser.add_argument('--eeg_n_heads', type=int, default=4, help='EEG iTransformer number of attention heads')
+    parser.add_argument('--eeg_e_layers', type=int, default=1, help='EEG iTransformer number of encoder layers')
+    parser.add_argument('--eeg_d_ff', type=int, default=256, help='EEG iTransformer feed-forward dimension')
+    parser.add_argument('--eeg_dropout', type=float, default=0.25, help='EEG iTransformer dropout rate')
+    
+    parser.add_argument('--fnirs_d_model', type=int, default=200, help='fNIRS iTransformer d_model')
+    parser.add_argument('--fnirs_n_heads', type=int, default=2, help='fNIRS iTransformer number of attention heads')
+    parser.add_argument('--fnirs_e_layers', type=int, default=1, help='fNIRS iTransformer number of encoder layers')
+    parser.add_argument('--fnirs_d_ff', type=int, default=256, help='fNIRS iTransformer feed-forward dimension')
+    parser.add_argument('--fnirs_dropout', type=float, default=0.5, help='fNIRS iTransformer dropout rate')
+    
     args = parser.parse_args()
 
     # Setup paths
     experiment_folder = f"./experiments/experiment_{args.experiment_id}"
-    eeg_data_path = os.path.join(experiment_folder, 'whitened_eeg_data.npy') if not args.no_eeg else None
-    fnirs_data_path = os.path.join(experiment_folder, 'whitened_fnirs_data.npy') if not args.no_fnirs else None
+    eeg_data_path = os.path.join(experiment_folder, args.eeg_data_file) if not args.no_eeg else None
+    fnirs_data_path = os.path.join(experiment_folder, args.fnirs_data_file) if not args.no_fnirs else None
     stimuli_folder = os.path.join(experiment_folder, 'image_pool')
     
     # Create output directories
@@ -605,13 +1025,42 @@ def main():
 
     # Initialize model
     print('Initializing ATMS model...')
+    
+    # Create iTransformer configurations from command line arguments
+    eeg_config = None
+    fnirs_config = None
+    
+    if not args.no_eeg:
+        eeg_config = Config(
+            d_model=args.eeg_d_model,
+            n_heads=args.eeg_n_heads,
+            e_layers=args.eeg_e_layers,
+            d_ff=args.eeg_d_ff,
+            dropout=args.eeg_dropout,
+            factor=1,
+            seq_len=train_dataset.eeg_X.shape[2] if not args.no_eeg else 1
+        )
+    
+    if not args.no_fnirs:
+        fnirs_config = Config(
+            d_model=args.fnirs_d_model,
+            n_heads=args.fnirs_n_heads,
+            e_layers=args.fnirs_e_layers,
+            d_ff=args.fnirs_d_ff,
+            dropout=args.fnirs_dropout,
+            factor=1,
+            seq_len=train_dataset.fnirs_X.shape[2] if not args.no_fnirs else 1
+        )
+    
     model = ATMS_Multimodal(
         eeg_channels=train_dataset.eeg_X.shape[1] if not args.no_eeg else 1,
         fnirs_channels=train_dataset.fnirs_X.shape[1] if not args.no_fnirs else 1,
         eeg_seq_len=train_dataset.eeg_X.shape[2] if not args.no_eeg else 1,
         fnirs_seq_len=train_dataset.fnirs_X.shape[2] if not args.no_fnirs else 1,
         no_fnirs=args.no_fnirs,
-        no_eeg=args.no_eeg
+        no_eeg=args.no_eeg,
+        eeg_config=eeg_config,
+        fnirs_config=fnirs_config
     )
     model.to(device)
 
@@ -732,6 +1181,11 @@ def main():
     print(f"Models saved in: {model_dir}")
     print(f"Results saved in: {results_dir}")
     print(f"Best accuracy: {best_accuracy:.4f} at epoch {best_epoch_info['epoch']}")
+
+    # Save training configuration
+    save_training_configuration(results_dir, args, model, train_dataset, test_dataset, best_epoch_info, model_dir)
+    save_training_configuration_json(results_dir, args, model, train_dataset, test_dataset, best_epoch_info, model_dir)
+    save_model_configuration(model_dir, args, model, train_dataset, test_dataset, eeg_config, fnirs_config)
 
 if __name__ == "__main__":
     main() 
