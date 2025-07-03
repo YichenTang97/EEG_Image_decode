@@ -38,12 +38,13 @@ def save_image_with_compression(image, file_path, use_compression=False, jpeg_qu
         # Save as PNG (original behavior)
         image.save(file_path, 'PNG')
 
-def save_execution_summary(output_folder, task, args, model_path, model_type, start_time, end_time, additional_info=None):
+def save_execution_summary(output_folder, experiment_folder, task, args, model_path, model_type, start_time, end_time, additional_info=None):
     """
     Save a comprehensive execution summary with all important parameters and execution details.
     
     Args:
         output_folder: Folder to save the summary
+        experiment_folder: Experiment folder
         task: Task performed (evaluate, generate, regenerate_stimuli)
         args: Command line arguments
         model_path: Path to the model used
@@ -77,6 +78,7 @@ Prior inference steps: {args.prior_inference_steps}
 Generator inference steps: {args.generator_inference_steps}
 Generation repeats: {args.generation_repeats}
 Image compression: {'JPEG (quality: ' + str(args.jpeg_quality) + ')' if args.compression else 'PNG (no compression)'}
+Diffusion prior timestamp: {getattr(args, 'diffusion_prior_timestamp', None) or 'Auto (train new)'}
 No EEG: {args.no_eeg}
 No fNIRS: {args.no_fnirs}
 EEG data file: {args.eeg_data_file if not args.no_eeg else 'None'}
@@ -323,13 +325,15 @@ def main():
     │       ├── {class}_gen_{j}.png
     │       └── execution_summary.txt
     └── diffusion_prior/
-        └── diffusion_prior.pt
+        ├── diffusion_prior.pt (legacy)
+        ├── diffusion_prior_01-15_14-30.pt
+        └── diffusion_prior_01-16_09-15.pt
     """
     # Record start time
     start_time = time.time()
     
     parser = argparse.ArgumentParser(description="EEG-fNIRS Image Generation and Retrieval Evaluation with ATMS_Multimodal")
-    parser.add_argument("--task", type=str, default="evaluate", choices=["generate", "evaluate", "regenerate_stimuli"], help="Task to perform")
+    parser.add_argument("--task", type=str, default="evaluate", choices=["generate", "evaluate", "regenerate_stimuli", "list_diffusion_priors"], help="Task to perform")
     parser.add_argument("--experiment_id", type=str, default="gtec_250527_data_250527_eeg_fnirs", help="Experiment ID")
     parser.add_argument("--eeg_data_file", type=str, default="whitened_eeg_data.npy", help="EEG data file name")
     parser.add_argument("--fnirs_data_file", type=str, default="whitened_fnirs_data.npy", help="fNIRS data file name")
@@ -340,12 +344,13 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use")
     parser.add_argument("--guidance_scale", type=float, default=50.0, help="Guidance scale for diffusion prior generation")
     parser.add_argument("--prior_inference_steps", type=int, default=50, help="Number of inference steps for diffusion prior generation")
-    parser.add_argument("--generator_inference_steps", type=int, default=50, help="Number of inference steps for image generator (Generator4Embeds)")
+    parser.add_argument("--generator_inference_steps", type=int, default=1, help="Number of inference steps for image generator (Generator4Embeds)")
     parser.add_argument("--compression", action="store_true", help="Save images as compressed JPEG instead of PNG")
     parser.add_argument("--jpeg_quality", type=int, default=85, help="JPEG quality (1-100) when compression is enabled")
     parser.add_argument("--no_fnirs", action="store_true", help="Use EEG-only model (for compatibility)")
     parser.add_argument("--no_eeg", action="store_true", help="Use fNIRS-only model")
     parser.add_argument("--model", type=str, default="sdxl-turbo", choices=["sdxl-turbo", "sdxl-lightning", "sdxs-512-dreamshaper"], help="Image generation model to use")
+    parser.add_argument("--diffusion_prior_timestamp", type=str, help="Timestamp of specific diffusion prior to use (e.g., '01-15_14-30'). If not provided, will always train a new diffusion prior.")
     args = parser.parse_args()
 
     experiment_folder = f"./experiments/experiment_{args.experiment_id}"
@@ -470,7 +475,19 @@ def main():
 
     gen_repeats = args.generation_repeats
     
-    if args.task == "regenerate_stimuli":
+    if args.task == "list_diffusion_priors":
+        print('Listing available diffusion priors...')
+        list_available_diffusion_priors(diffusion_prior_folder)
+        
+        # Save execution summary for list_diffusion_priors task
+        additional_info = {
+            "Task": "List diffusion priors",
+            "Diffusion prior folder": diffusion_prior_folder
+        }
+        save_execution_summary(diffusion_prior_folder, experiment_folder, args.task, args, "N/A", "N/A", start_time, time.time(), additional_info)
+        return
+    
+    elif args.task == "regenerate_stimuli":
         print('Regenerating images for each unique test image...')
 
         # Create timestamped subfolder for regenerated stimuli
@@ -497,7 +514,7 @@ def main():
             "Regenerated stimuli folder": regenerated_stimuli_folder,
             "Image format": "JPEG (quality: " + str(args.jpeg_quality) + ")" if args.compression else "PNG"
         }
-        save_execution_summary(regenerated_stimuli_folder, args.task, args, model_path, model_type, start_time, time.time(), additional_info)
+        save_execution_summary(regenerated_stimuli_folder, experiment_folder, args.task, args, model_path, model_type, start_time, time.time(), additional_info)
         
         return
 
@@ -509,18 +526,30 @@ def main():
 
     # Setup diffusion prior only if needed
     pipe = None
+    diffusion_prior_timestamp_used = None
     if (args.task == "generate" and not args.generate_without_prior) or (args.task == "evaluate" and args.evaluation_with_prior):
         print('Setting up diffusion prior...')
+        
+        # Show available diffusion priors for user reference
+        list_available_diffusion_priors(diffusion_prior_folder)
+        
         diffusion_prior = DiffusionPriorUNet(cond_dim=1024, dropout=0.1).to(device)
         pipe = Pipe(diffusion_prior, device=device)
 
-        save_path = os.path.join(diffusion_prior_folder, "diffusion_prior.pt")
-        if os.path.exists(save_path):
-            print('Loading existing diffusion prior model...')
-            pipe.diffusion_prior.load_state_dict(torch.load(save_path))
+        # Get appropriate diffusion prior path
+        load_path, save_path, diffusion_prior_timestamp_used = get_diffusion_prior_path(
+            diffusion_prior_folder, 
+            args.diffusion_prior_timestamp, 
+            current_time
+        )
+        
+        if load_path and os.path.exists(load_path):
+            print(f'Loading existing diffusion prior model from: {load_path}')
+            pipe.diffusion_prior.load_state_dict(torch.load(load_path))
         else:
-            print('Training diffusion prior...')
+            print(f'Training new diffusion prior...')
             pipe.train(embedding_loader, num_epochs=150, learning_rate=1e-3)
+            print(f'Saving diffusion prior to: {save_path}')
             torch.save(pipe.diffusion_prior.state_dict(), save_path)
     else:
         print('Skipping diffusion prior setup...')
@@ -561,9 +590,10 @@ def main():
             "Total images generated": len(emb_eeg_fnirs_test) * gen_repeats,
             "Generated images folder": generated_images_timestamped_folder,
             "Generation method": "Without diffusion prior" if args.generate_without_prior else "With diffusion prior",
+            "Diffusion prior timestamp": diffusion_prior_timestamp_used if not args.generate_without_prior else "N/A",
             "Image format": "JPEG (quality: " + str(args.jpeg_quality) + ")" if args.compression else "PNG"
         }
-        save_execution_summary(generated_images_timestamped_folder, args.task, args, model_path, model_type, start_time, time.time(), additional_info)
+        save_execution_summary(generated_images_timestamped_folder, experiment_folder, args.task, args, model_path, model_type, start_time, time.time(), additional_info)
         
         # Summary of generated content
         print("\n" + "="*60)
@@ -572,6 +602,8 @@ def main():
         print(f"Model type: {model_type}")
         print(f"Image generation model: {args.model}")
         print(f"Generation method: {'Without diffusion prior' if args.generate_without_prior else 'With diffusion prior'}")
+        if not args.generate_without_prior:
+            print(f"Diffusion prior timestamp: {diffusion_prior_timestamp_used}")
         print(f"Diffusion prior inference steps: {args.prior_inference_steps}")
         print(f"Generator inference steps: {args.generator_inference_steps}")
         print(f"Guidance scale: {args.guidance_scale}")
@@ -760,11 +792,12 @@ def main():
             "Unique classes": len(set(classes_test)),
             "K-values evaluated": str(k_values),
             "Diffusion prior used": "Yes" if args.evaluation_with_prior else "No",
+            "Diffusion prior timestamp": diffusion_prior_timestamp_used if args.evaluation_with_prior else "N/A",
             "Results CSV": csv_path,
             "Detailed results": txt_path,
             "Predictions data": predictions_path
         }
-        save_execution_summary(evaluation_results_folder, args.task, args, model_path, model_type, start_time, time.time(), additional_info)
+        save_execution_summary(evaluation_results_folder, experiment_folder, args.task, args, model_path, model_type, start_time, time.time(), additional_info)
         
         # Summary of evaluation
         print("\n" + "="*60)
@@ -773,6 +806,8 @@ def main():
         print(f"Model type: {model_type}")
         print(f"Image generation model: {args.model}")
         print(f"Model used: {model_path}")
+        if args.evaluation_with_prior:
+            print(f"Diffusion prior timestamp: {diffusion_prior_timestamp_used}")
         print(f"Diffusion prior inference steps: {args.prior_inference_steps}")
         print(f"Generator inference steps: {args.generator_inference_steps}")
         print(f"Guidance scale: {args.guidance_scale}")
@@ -905,6 +940,115 @@ def create_itransformer_configs_from_model_config(model_config, eeg_seq_len, fni
             print(f"Created fNIRS iTransformer config from model: d_model={fnirs_config.d_model}, n_heads={fnirs_config.n_heads}, e_layers={fnirs_config.e_layers}, d_ff={fnirs_config.d_ff}, dropout={fnirs_config.dropout}")
     
     return eeg_config, fnirs_config
+
+def find_available_diffusion_priors(diffusion_prior_folder):
+    """
+    Find all available diffusion prior files with timestamps.
+    
+    Args:
+        diffusion_prior_folder: Path to diffusion prior folder
+        
+    Returns:
+        List of tuples (timestamp, file_path) sorted by timestamp (newest first)
+    """
+    if not os.path.exists(diffusion_prior_folder):
+        return []
+    
+    diffusion_priors = []
+    
+    # Look for timestamped files: diffusion_prior_MM-DD_HH-MM.pt
+    for file in os.listdir(diffusion_prior_folder):
+        if file.startswith("diffusion_prior_") and file.endswith(".pt"):
+            timestamp = file[len("diffusion_prior_"):-3]  # Remove prefix and .pt extension
+            file_path = os.path.join(diffusion_prior_folder, file)
+            diffusion_priors.append((timestamp, file_path))
+    
+    # Also check for legacy diffusion_prior.pt
+    legacy_path = os.path.join(diffusion_prior_folder, "diffusion_prior.pt")
+    if os.path.exists(legacy_path):
+        diffusion_priors.append(("legacy", legacy_path))
+    
+    # Sort by timestamp (newest first), with legacy at the end
+    diffusion_priors.sort(key=lambda x: x[0] if x[0] != "legacy" else "0000-00_00-00")
+    diffusion_priors.reverse()
+    
+    return diffusion_priors
+
+def get_diffusion_prior_path(diffusion_prior_folder, specified_timestamp=None, current_timestamp=None):
+    """
+    Get the appropriate diffusion prior path based on user specification.
+    
+    Args:
+        diffusion_prior_folder: Path to diffusion prior folder
+        specified_timestamp: User-specified timestamp (optional)
+        current_timestamp: Current timestamp for new training
+        
+    Returns:
+        Tuple of (load_path, save_path, timestamp_used)
+        load_path: Path to load existing model (None if should train new)
+        save_path: Path to save new model
+        timestamp_used: Timestamp that will be used
+        
+    Note:
+        If no timestamp is specified, will always train a new diffusion prior
+        instead of using existing ones. This ensures fresh training each time.
+    """
+    available_priors = find_available_diffusion_priors(diffusion_prior_folder)
+    
+    if specified_timestamp:
+        # User specified a particular timestamp
+        for timestamp, file_path in available_priors:
+            if timestamp == specified_timestamp:
+                print(f"Using specified diffusion prior: {file_path}")
+                return file_path, file_path, timestamp
+        
+        # Specified timestamp not found
+        print(f"Warning: Specified diffusion prior timestamp '{specified_timestamp}' not found.")
+        print("Available diffusion priors:")
+        for timestamp, file_path in available_priors:
+            print(f"  - {timestamp}: {file_path}")
+        raise FileNotFoundError(f"Diffusion prior with timestamp '{specified_timestamp}' not found")
+    
+    else:
+        # No timestamp specified - always train new diffusion prior
+        if current_timestamp:
+            new_save_path = os.path.join(diffusion_prior_folder, f"diffusion_prior_{current_timestamp}.pt")
+            print(f"No diffusion prior timestamp specified. Will train new one: {new_save_path}")
+            if available_priors:
+                print("Note: Existing diffusion priors found but will train new one:")
+                for timestamp, file_path in available_priors:
+                    print(f"  - {timestamp}: {file_path}")
+            return None, new_save_path, current_timestamp
+        else:
+            # Fallback to legacy naming
+            legacy_path = os.path.join(diffusion_prior_folder, "diffusion_prior.pt")
+            print(f"No diffusion prior timestamp specified. Will train new one: {legacy_path}")
+            if available_priors:
+                print("Note: Existing diffusion priors found but will train new one:")
+                for timestamp, file_path in available_priors:
+                    print(f"  - {timestamp}: {file_path}")
+            return None, legacy_path, "legacy"
+
+def list_available_diffusion_priors(diffusion_prior_folder):
+    """
+    List all available diffusion priors in a user-friendly format.
+    
+    Args:
+        diffusion_prior_folder: Path to diffusion prior folder
+    """
+    available_priors = find_available_diffusion_priors(diffusion_prior_folder)
+    
+    if not available_priors:
+        print("No diffusion priors found.")
+        return
+    
+    print("Available diffusion priors:")
+    for timestamp, file_path in available_priors:
+        file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
+        mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(file_path))
+        print(f"  - {timestamp}: {file_path}")
+        print(f"    Size: {file_size:.1f} MB, Modified: {mod_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print()
 
 if __name__ == "__main__":
     main()
